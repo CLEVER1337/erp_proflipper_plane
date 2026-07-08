@@ -55,4 +55,5 @@ RUN chmod -R 777 /code
 # Expose container port and run entry point script
 EXPOSE 8000
 
-CMD ["./bin/docker-entrypoint-api.sh"]
+# ERP deploy: api-only container that migrates itself and skips bucket creation.
+CMD ["./bin/docker-entrypoint-api-erp.sh"]
