@@ -36,6 +36,14 @@ class S3Storage(S3Boto3Storage):
         # Use the SIGNED_URL_EXPIRATION environment variable for the expiration time (default: 3600 seconds)
         self.signed_url_expiration = int(os.environ.get("SIGNED_URL_EXPIRATION", "3600"))
 
+        # ERP deploy: attachments live in ERP (Postgres bytea), not in Plane's S3.
+        # With no S3 endpoint configured we skip building a boto client so the app
+        # boots and file endpoints degrade gracefully (return None/False) instead
+        # of crashing on boto.
+        if not self.aws_s3_endpoint_url:
+            self.s3_client = None
+            return
+
         if os.environ.get("USE_MINIO") == "1":
             # Determine protocol based on environment variable
             if os.environ.get("MINIO_ENDPOINT_SSL") == "1":
@@ -64,6 +72,8 @@ class S3Storage(S3Boto3Storage):
 
     def generate_presigned_post(self, object_name, file_type, file_size, expiration=None):
         """Generate a presigned URL to upload an S3 object"""
+        if self.s3_client is None:
+            return None
         if expiration is None:
             expiration = self.signed_url_expiration
         fields = {"Content-Type": file_type}
@@ -118,6 +128,8 @@ class S3Storage(S3Boto3Storage):
         filename=None,
     ):
         """Generate a presigned URL to share an S3 object"""
+        if self.s3_client is None:
+            return None
         if expiration is None:
             expiration = self.signed_url_expiration
         content_disposition = self._get_content_disposition(disposition, filename)
@@ -141,6 +153,8 @@ class S3Storage(S3Boto3Storage):
 
     def get_object_metadata(self, object_name):
         """Get the metadata for an S3 object"""
+        if self.s3_client is None:
+            return None
         try:
             response = self.s3_client.head_object(Bucket=self.aws_storage_bucket_name, Key=object_name)
         except ClientError as e:
@@ -157,6 +171,8 @@ class S3Storage(S3Boto3Storage):
 
     def copy_object(self, object_name, new_object_name):
         """Copy an S3 object to a new location"""
+        if self.s3_client is None:
+            return None
         try:
             response = self.s3_client.copy_object(
                 Bucket=self.aws_storage_bucket_name,
@@ -177,6 +193,8 @@ class S3Storage(S3Boto3Storage):
         extra_args: dict = {},
     ) -> bool:
         """Upload a file directly to S3"""
+        if self.s3_client is None:
+            return False
         try:
             if content_type:
                 extra_args["ContentType"] = content_type
@@ -194,6 +212,8 @@ class S3Storage(S3Boto3Storage):
 
     def delete_files(self, object_names):
         """Delete an S3 object"""
+        if self.s3_client is None:
+            return False
         try:
             self.s3_client.delete_objects(
                 Bucket=self.aws_storage_bucket_name,
