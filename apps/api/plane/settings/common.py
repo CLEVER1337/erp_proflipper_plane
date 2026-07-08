@@ -334,6 +334,14 @@ CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_ACCEPT_CONTENT = ["application/json"]
 
+# ERP deploy: run the API as a single container without a broker/worker.
+# With eager mode every .delay() runs synchronously in-process, so issue
+# create/update keeps working without RabbitMQ or a celery worker. Eager task
+# failures must NOT propagate into the HTTP request (e.g. email with no SMTP,
+# unregistered webhooks), hence EAGER_PROPAGATES stays False.
+CELERY_TASK_ALWAYS_EAGER = int(os.environ.get("CELERY_TASK_ALWAYS_EAGER", "0")) == 1
+CELERY_TASK_EAGER_PROPAGATES = False
+
 
 CELERY_IMPORTS = (
     # scheduled tasks
