@@ -2,13 +2,26 @@
 # Plane API from the repo root, like the other ERP services. Build context is the
 # repo root; all COPY paths are under apps/api/. Api-only container (no worker/beat).
 
-FROM python:3.12.10-alpine
+# Base image is parameterised so restricted networks can pull it from a mirror
+# registry, e.g. --build-arg BASE_IMAGE=dockerhub.timeweb.cloud/library/python:3.12.10-alpine
+ARG BASE_IMAGE=python:3.12.10-alpine
+FROM ${BASE_IMAGE}
 
 # set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 ENV INSTANCE_CHANGELOG_URL=https://sites.plane.so/pages/691ef037bcfe416a902e48cb55f59891/
+
+# Optional mirrors for restricted networks (RF). Defaults are empty => upstream,
+# so the public image is unchanged. Pass e.g.:
+#   --build-arg ALPINE_MIRROR=https://mirror.yandex.ru/mirrors/alpine
+#   --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG ALPINE_MIRROR=
+ARG PIP_INDEX_URL=
+RUN if [ -n "$ALPINE_MIRROR" ]; then \
+      sed -i "s|https://dl-cdn.alpinelinux.org/alpine|$ALPINE_MIRROR|g" /etc/apk/repositories; \
+    fi
 
 # Update system packages for security
 RUN apk update && apk upgrade
@@ -36,7 +49,7 @@ RUN apk add --no-cache --virtual .build-deps \
     "libc-dev" \
     "linux-headers" \
     && \
-    pip install -r requirements.txt --compile --no-cache-dir \
+    pip install ${PIP_INDEX_URL:+--index-url "$PIP_INDEX_URL"} -r requirements.txt --compile --no-cache-dir \
     && \
     apk del .build-deps \
     && \
