@@ -201,21 +201,18 @@ SITE_ID = 1
 # User Model
 AUTH_USER_MODEL = "db.User"
 
-# Database
-if bool(os.environ.get("DATABASE_URL")):
-    # Parse database configuration from $DATABASE_URL
-    DATABASES = {"default": dj_database_url.config()}
-else:
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": os.environ.get("POSTGRES_DB"),
-            "USER": os.environ.get("POSTGRES_USER"),
-            "PASSWORD": os.environ.get("POSTGRES_PASSWORD"),
-            "HOST": os.environ.get("POSTGRES_HOST"),
-            "PORT": os.environ.get("POSTGRES_PORT", "5432"),
-        }
+# Database — ERP-style env vars (DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD),
+# matching the other ERP microservices instead of Plane's POSTGRES_* / DATABASE_URL.
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": os.environ.get("DB_NAME"),
+        "USER": os.environ.get("DB_USER"),
+        "PASSWORD": os.environ.get("DB_PASSWORD"),
+        "HOST": os.environ.get("DB_HOST"),
+        "PORT": os.environ.get("DB_PORT", "5432"),
     }
+}
 
 
 if os.environ.get("ENABLE_READ_REPLICA", "0") == "1":
@@ -238,9 +235,11 @@ if os.environ.get("ENABLE_READ_REPLICA", "0") == "1":
     MIDDLEWARE.append("plane.middleware.db_routing.ReadReplicaRoutingMiddleware")
 
 
-# Redis Config
-REDIS_URL = os.environ.get("REDIS_URL")
-REDIS_SSL = REDIS_URL and "rediss" in REDIS_URL
+# Redis Config — hardcoded to the shared ERP Redis (same box the C# services use,
+# 127.0.0.1:6379 password gavno), no env var, mirroring ERP's `const RedisConfiguration`.
+# Dedicated db index /3 to avoid key collisions with the ERP cache (db 0).
+REDIS_URL = "redis://:gavno@127.0.0.1:6379/3"
+REDIS_SSL = False
 
 if REDIS_SSL:
     CACHES = {
