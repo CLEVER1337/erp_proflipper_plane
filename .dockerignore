@@ -67,3 +67,5 @@ temp/
 build/
 node_modules/
 README.md
+erp_config.json
+**/erp_config.json

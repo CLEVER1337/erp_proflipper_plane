@@ -27,6 +27,22 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 _logger = logging.getLogger("plane")
 
+# ERP config: optionally load a JSON file into the environment so Plane can be
+# configured from erp_config.json (analog of the .NET services' appsettings.json)
+# instead of many -e flags. Real env vars still win (setdefault), so nothing breaks.
+# DB_* creds are intentionally NOT expected here — they stay as env, like the ERP
+# services keep their DB block in .env. Non-string values (e.g. ERP_EMPLOYEES list)
+# are re-serialised to JSON strings, since env vars are strings.
+import json as _json  # noqa: E402
+_erp_cfg_path = os.environ.get("ERP_CONFIG_JSON", os.path.join(os.path.dirname(BASE_DIR), "erp_config.json"))
+if os.path.exists(_erp_cfg_path):
+    try:
+        with open(_erp_cfg_path) as _f:
+            for _k, _v in _json.load(_f).items():
+                os.environ.setdefault(_k, _v if isinstance(_v, str) else _json.dumps(_v))
+    except Exception as _e:  # never block startup on a bad/partial config file
+        _logger.warning("ERP config not loaded from %s: %s", _erp_cfg_path, _e)
+
 # Secret Key — use `or` so an explicitly empty env var is treated the same as unset,
 # falling back to a random key rather than passing "" to Django (GHSA-cmwv-pjmw-8483).
 SECRET_KEY = os.environ.get("SECRET_KEY") or get_random_secret_key()

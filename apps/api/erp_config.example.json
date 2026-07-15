@@ -1,0 +1,26 @@
+{
+  "_comment": "ERP config for Plane (analog of appsettings.json). Loaded into env by settings/common.py. Real env vars override these. DB_* creds are NOT here — pass them as env (like the ERP services' .env). Copy to erp_config.json (gitignored) with real values, mount it at /code/erp_config.json or point ERP_CONFIG_JSON at it.",
+
+  "SECRET_KEY": "<set-a-strong-secret>",
+  "DEBUG": "0",
+  "PORT": "8000",
+  "GUNICORN_WORKERS": "2",
+  "WEB_URL": "http://localhost:8000",
+  "CORS_ALLOWED_ORIGINS": "http://localhost:3000",
+
+  "CELERY_TASK_ALWAYS_EAGER": "1",
+  "USE_MINIO": "0",
+  "AWS_S3_ENDPOINT_URL": "",
+  "API_KEY_RATE_LIMIT": "60/minute",
+
+  "ERP_GATEWAY_TOKEN": "<stable-gateway-token, same as leadservice Plane:API_TOKEN>",
+  "ERP_WORKSPACE_SLUG": "erp",
+  "ERP_PROJECT_IDENTIFIER": "TASK",
+  "ERP_PROJECT_NAME": "ERP Tasks",
+  "ERP_EMPLOYEES": [
+    { "erpUserId": 95, "email": "owner@erp", "username": "owner" }
+  ],
+
+  "USER_SERVICE_URL": "http://localhost:7237",
+  "INTEGRATION_API_KEY": "<same-as-erp-IntegrationApiKey>"
+}
