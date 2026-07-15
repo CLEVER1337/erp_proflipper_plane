@@ -12,12 +12,10 @@ Config (env):
                             (so leadservice Plane:API_TOKEN is stable); else random
   ERP_PROJECT_IDENTIFIER   default "TASK"
   ERP_PROJECT_NAME         default "ERP Tasks"
-  ERP_EMPLOYEES            JSON: [{"erpUserId":95,"email":"..","username":"..","name":".."}]
-  USER_SERVICE_URL         e.g. http://localhost:7237 (for mapping push)
-  INTEGRATION_API_KEY      X-Api-Key for UserService /plane-map/upsert
+  USER_SERVICE_URL         e.g. http://localhost:7237 (source of employees + mapping push)
+  INTEGRATION_API_KEY      X-Api-Key for UserService /users/for-plane and /plane-map/upsert
 """
 
-import json
 import os
 
 import requests
@@ -107,14 +105,25 @@ class Command(BaseCommand):
         self._log(f"project={project.id} identifier={project.identifier}")
 
         # 5. provision employees + push mapping to UserService
-        try:
-            employees = json.loads(os.environ.get("ERP_EMPLOYEES", "[]"))
-        except json.JSONDecodeError as e:
-            self.stderr.write(f"[erp_bootstrap] bad ERP_EMPLOYEES json: {e}")
-            employees = []
-
         user_service = os.environ.get("USER_SERVICE_URL")
         api_key = os.environ.get("INTEGRATION_API_KEY")
+        if not (user_service and api_key):
+            self._log("USER_SERVICE_URL / INTEGRATION_API_KEY not set — skip employee provisioning")
+            return
+
+        # Source of truth is UserService, not env: fetch active employees (bots and
+        # investors excluded server-side), provision each in Plane, push the mapping back.
+        try:
+            resp = requests.get(
+                f"{user_service}/users/for-plane",
+                headers={"X-Api-Key": api_key},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            employees = resp.json()
+        except (requests.RequestException, ValueError) as e:
+            self.stderr.write(f"[erp_bootstrap] could not fetch employees from UserService: {e}")
+            return
 
         for emp in employees:
             email = emp.get("email")
@@ -128,17 +137,14 @@ class Command(BaseCommand):
                 u.save(update_fields=["password"])
             WorkspaceMember.objects.get_or_create(workspace=ws, member=u, defaults={"role": ROLE_MEMBER})
             ProjectMember.objects.get_or_create(project=project, member=u, defaults={"role": ROLE_MEMBER})
+            try:
+                requests.post(
+                    f"{user_service}/plane-map/upsert",
+                    headers={"X-Api-Key": api_key},
+                    json={"erpUserId": erp_id, "planeUserId": str(u.id), "planeEmail": email},
+                    timeout=10,
+                )
+            except requests.RequestException as e:
+                self.stderr.write(f"[erp_bootstrap] mapping push failed for {email}: {e}")
 
-            if user_service and api_key:
-                try:
-                    requests.post(
-                        f"{user_service}/plane-map/upsert",
-                        headers={"X-Api-Key": api_key},
-                        json={"erpUserId": erp_id, "planeUserId": str(u.id), "planeEmail": email},
-                        timeout=10,
-                    )
-                except requests.RequestException as e:
-                    self.stderr.write(f"[erp_bootstrap] mapping push failed for {email}: {e}")
-
-        if employees:
-            self._log(f"provisioned {len(employees)} employees")
+        self._log(f"provisioned {len(employees)} employees from UserService")
