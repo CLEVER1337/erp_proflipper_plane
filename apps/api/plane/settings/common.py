@@ -39,6 +39,8 @@ if os.path.exists(_erp_cfg_path):
     try:
         with open(_erp_cfg_path) as _f:
             for _k, _v in _json.load(_f).items():
+                if _k.startswith("_"):
+                    continue  # skip doc keys like "_comment"
                 os.environ.setdefault(_k, _v if isinstance(_v, str) else _json.dumps(_v))
     except Exception as _e:  # never block startup on a bad/partial config file
         _logger.warning("ERP config not loaded from %s: %s", _erp_cfg_path, _e)

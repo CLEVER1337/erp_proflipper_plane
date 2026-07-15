@@ -48,6 +48,8 @@ COPY apps/api/manage.py manage.py
 COPY apps/api/plane plane/
 COPY apps/api/templates templates/
 COPY apps/api/package.json package.json
+# Non-secret ERP config (secrets come from env). Loaded by settings/common.py.
+COPY apps/api/erp_config.json erp_config.json
 
 RUN apk --no-cache add "bash~=5.2"
 COPY apps/api/bin ./bin/

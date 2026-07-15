@@ -118,5 +118,3 @@ packages/i18n/src/types/keys.generated.ts
 # Local security notes (not for version control)
 /security/
 
-# ERP config with secrets (real values) — keep example only
-erp_config.json
