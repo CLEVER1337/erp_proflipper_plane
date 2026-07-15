@@ -25,6 +25,12 @@ python manage.py configure_instance
 # attachments live in ERP (Postgres bytea).
 
 python manage.py clear_cache
+
+# Idempotent ERP bootstrap: bot user, workspace, gateway token, project + default
+# states, employee provisioning + mapping push. Self-heals a fresh erp_plane db;
+# a no-op when everything already exists. Guarded so it never blocks startup.
+python manage.py erp_bootstrap || true
+
 python manage.py collectstatic --noinput
 
 exec gunicorn -w "${GUNICORN_WORKERS:-1}" -k uvicorn.workers.UvicornWorker \
