@@ -102,47 +102,88 @@ deploy-plane:
       IMAGE_LATEST="$DOCKER_REGISTRY/$CI_PROJECT_PATH:$IMAGE_ENV_TAG"
       IMAGE_ROLLBACK="$DOCKER_REGISTRY/$CI_PROJECT_PATH:$IMAGE_ROLLBACK_TAG"
 
-      encode() { printf '%s' "$1" | base64 | tr -d '\n'; }
-      CI_REGISTRY_PASSWORD_B64="$(encode "$CI_REGISTRY_PASSWORD")"
-      DB_PASSWORD_B64="$(encode "$DB_PASSWORD")"
-      SECRET_KEY_B64="$(encode "$SECRET_KEY")"
-      ERP_GATEWAY_TOKEN_B64="$(encode "$ERP_GATEWAY_TOKEN")"
-      INTEGRATION_API_KEY_B64="$(encode "$INTEGRATION_API_KEY")"
-      REDIS_PASSWORD_B64="$(encode "$REDIS_PASSWORD")"
-
       echo "Deploying $SERVICE_NAME from $CI_COMMIT_BRANCH to $DEPLOY_HOST:$SERVICE_PORT_VALUE"
-      ssh -o StrictHostKeyChecking=yes -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
-        CONTAINER_NAME="$CONTAINER_NAME_VALUE" \
-        SERVICE_PORT="$SERVICE_PORT_VALUE" \
-        IMAGE_TAG="$IMAGE_TAG" \
-        IMAGE_LATEST="$IMAGE_LATEST" \
-        IMAGE_ROLLBACK="$IMAGE_ROLLBACK" \
-        DOCKER_REGISTRY="$DOCKER_REGISTRY" \
-        CI_REGISTRY_USER="$CI_REGISTRY_USER" \
-        CI_REGISTRY_PASSWORD_B64="$CI_REGISTRY_PASSWORD_B64" \
-        DB_HOST="$DB_HOST" \
-        DB_PORT="$DB_PORT" \
-        DB_USER="$DB_USER" \
-        DB_NAME="$DB_NAME_VALUE" \
-        DB_PASSWORD_B64="$DB_PASSWORD_B64" \
-        SECRET_KEY_B64="$SECRET_KEY_B64" \
-        ERP_GATEWAY_TOKEN_B64="$ERP_GATEWAY_TOKEN_B64" \
-        INTEGRATION_API_KEY_B64="$INTEGRATION_API_KEY_B64" \
-        USER_SERVICE_URL="$USER_SERVICE_URL_VALUE" \
-        REDIS_HOST="$REDIS_HOST" \
-        REDIS_PORT="$REDIS_PORT" \
-        REDIS_PASSWORD_B64="$REDIS_PASSWORD_B64" \
-        REDIS_DB="$REDIS_DB_VALUE" \
-        bash -s << 'REMOTE_SCRIPT'
+      encode() { printf '%s' "$1" | base64 | tr -d '\n'; }
+      emit() { printf '%s_B64=%s\n' "$1" "$(encode "$2")"; }
+
+      {
+        emit CONTAINER_NAME "$CONTAINER_NAME_VALUE"
+        emit SERVICE_PORT "$SERVICE_PORT_VALUE"
+        emit IMAGE_TAG "$IMAGE_TAG"
+        emit IMAGE_LATEST "$IMAGE_LATEST"
+        emit IMAGE_ROLLBACK "$IMAGE_ROLLBACK"
+        emit DOCKER_REGISTRY "$DOCKER_REGISTRY"
+        emit CI_REGISTRY_USER "$CI_REGISTRY_USER"
+        emit CI_REGISTRY_PASSWORD "$CI_REGISTRY_PASSWORD"
+        emit DB_HOST "$DB_HOST"
+        emit DB_PORT "$DB_PORT"
+        emit DB_USER "$DB_USER"
+        emit DB_NAME "$DB_NAME_VALUE"
+        emit DB_PASSWORD "$DB_PASSWORD"
+        emit SECRET_KEY "$SECRET_KEY"
+        emit ERP_GATEWAY_TOKEN "$ERP_GATEWAY_TOKEN"
+        emit INTEGRATION_API_KEY "$INTEGRATION_API_KEY"
+        emit USER_SERVICE_URL "$USER_SERVICE_URL_VALUE"
+        emit REDIS_HOST "$REDIS_HOST"
+        emit REDIS_PORT "$REDIS_PORT"
+        emit REDIS_PASSWORD "$REDIS_PASSWORD"
+        emit REDIS_DB "$REDIS_DB_VALUE"
+        cat << 'REMOTE_SCRIPT'
         set -euo pipefail
 
         decode() { printf '%s' "$1" | base64 -d; }
+        CONTAINER_NAME="$(decode "$CONTAINER_NAME_B64")"
+        SERVICE_PORT="$(decode "$SERVICE_PORT_B64")"
+        IMAGE_TAG="$(decode "$IMAGE_TAG_B64")"
+        IMAGE_LATEST="$(decode "$IMAGE_LATEST_B64")"
+        IMAGE_ROLLBACK="$(decode "$IMAGE_ROLLBACK_B64")"
+        DOCKER_REGISTRY="$(decode "$DOCKER_REGISTRY_B64")"
+        CI_REGISTRY_USER="$(decode "$CI_REGISTRY_USER_B64")"
         CI_REGISTRY_PASSWORD="$(decode "$CI_REGISTRY_PASSWORD_B64")"
+        DB_HOST="$(decode "$DB_HOST_B64")"
+        DB_PORT="$(decode "$DB_PORT_B64")"
+        DB_USER="$(decode "$DB_USER_B64")"
+        DB_NAME="$(decode "$DB_NAME_B64")"
         DB_PASSWORD="$(decode "$DB_PASSWORD_B64")"
         SECRET_KEY="$(decode "$SECRET_KEY_B64")"
         ERP_GATEWAY_TOKEN="$(decode "$ERP_GATEWAY_TOKEN_B64")"
         INTEGRATION_API_KEY="$(decode "$INTEGRATION_API_KEY_B64")"
+        USER_SERVICE_URL="$(decode "$USER_SERVICE_URL_B64")"
+        REDIS_HOST="$(decode "$REDIS_HOST_B64")"
+        REDIS_PORT="$(decode "$REDIS_PORT_B64")"
         REDIS_PASSWORD="$(decode "$REDIS_PASSWORD_B64")"
+        REDIS_DB="$(decode "$REDIS_DB_B64")"
+
+        ENV_FILE="$(mktemp)"
+        chmod 600 "$ENV_FILE"
+        cleanup() { rm -f "$ENV_FILE"; }
+        trap cleanup EXIT HUP INT TERM
+
+        write_env() {
+          local key="$1"
+          local value="$2"
+          case "$value" in
+            *$'\n'*|*$'\r'*) echo "Invalid newline in $key"; exit 1 ;;
+          esac
+          printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+        }
+
+        write_env PORT "$SERVICE_PORT"
+        write_env DB_HOST "$DB_HOST"
+        write_env DB_PORT "$DB_PORT"
+        write_env DB_USER "$DB_USER"
+        write_env DB_NAME "$DB_NAME"
+        write_env DB_PASSWORD "$DB_PASSWORD"
+        write_env SECRET_KEY "$SECRET_KEY"
+        write_env ERP_GATEWAY_TOKEN "$ERP_GATEWAY_TOKEN"
+        write_env INTEGRATION_API_KEY "$INTEGRATION_API_KEY"
+        write_env USER_SERVICE_URL "$USER_SERVICE_URL"
+        write_env REDIS_HOST "$REDIS_HOST"
+        write_env REDIS_PORT "$REDIS_PORT"
+        write_env REDIS_PASSWORD "$REDIS_PASSWORD"
+        write_env REDIS_DB "$REDIS_DB"
+        write_env WEB_URL "http://127.0.0.1:$SERVICE_PORT"
+        write_env ALLOWED_HOSTS "*"
 
         echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$DOCKER_REGISTRY"
         docker pull "$IMAGE_TAG"
@@ -157,32 +198,13 @@ deploy-plane:
         docker stop "$CONTAINER_NAME" 2>/dev/null || true
         docker rm "$CONTAINER_NAME" 2>/dev/null || true
 
-        env_args=(
-          -e "PORT=$SERVICE_PORT"
-          -e "DB_HOST=$DB_HOST"
-          -e "DB_PORT=$DB_PORT"
-          -e "DB_USER=$DB_USER"
-          -e "DB_NAME=$DB_NAME"
-          -e "DB_PASSWORD=$DB_PASSWORD"
-          -e "SECRET_KEY=$SECRET_KEY"
-          -e "ERP_GATEWAY_TOKEN=$ERP_GATEWAY_TOKEN"
-          -e "INTEGRATION_API_KEY=$INTEGRATION_API_KEY"
-          -e "USER_SERVICE_URL=$USER_SERVICE_URL"
-          -e "REDIS_HOST=$REDIS_HOST"
-          -e "REDIS_PORT=$REDIS_PORT"
-          -e "REDIS_PASSWORD=$REDIS_PASSWORD"
-          -e "REDIS_DB=$REDIS_DB"
-          -e "WEB_URL=http://127.0.0.1:$SERVICE_PORT"
-          -e "ALLOWED_HOSTS=*"
-        )
-
         start_container() {
           local image="$1"
           docker run -d \
             --name "$CONTAINER_NAME" \
             --network host \
             --restart unless-stopped \
-            "${env_args[@]}" \
+            --env-file "$ENV_FILE" \
             "$image"
         }
 
@@ -208,6 +230,7 @@ deploy-plane:
         docker logout "$DOCKER_REGISTRY"
         exit 1
       REMOTE_SCRIPT
+      } | ssh -o StrictHostKeyChecking=yes -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" bash -s
 
 healthcheck-plane:
   stage: healthcheck
