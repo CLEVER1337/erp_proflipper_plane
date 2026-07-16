@@ -8,6 +8,7 @@
 import ipaddress
 import logging
 import os
+from urllib.parse import quote
 from urllib.parse import urlparse
 from urllib.parse import urljoin
 
@@ -254,10 +255,14 @@ if os.environ.get("ENABLE_READ_REPLICA", "0") == "1":
     MIDDLEWARE.append("plane.middleware.db_routing.ReadReplicaRoutingMiddleware")
 
 
-# Redis Config — hardcoded to the shared ERP Redis (same box the C# services use,
-# 127.0.0.1:6379 password gavno), no env var, mirroring ERP's `const RedisConfiguration`.
-# Dedicated db index /3 to avoid key collisions with the ERP cache (db 0).
-REDIS_URL = "redis://:gavno@127.0.0.1:6379/3"
+# Redis Config. Prod and dev use separate logical databases on the shared ERP
+# Redis instance; credentials stay in GitLab variables and never enter the image.
+_redis_host = os.environ.get("REDIS_HOST", "127.0.0.1")
+_redis_port = os.environ.get("REDIS_PORT", "6379")
+_redis_db = os.environ.get("REDIS_DB", "3")
+_redis_password = os.environ.get("REDIS_PASSWORD", "")
+_redis_auth = f":{quote(_redis_password, safe='')}@" if _redis_password else ""
+REDIS_URL = f"redis://{_redis_auth}{_redis_host}:{_redis_port}/{_redis_db}"
 REDIS_SSL = False
 
 if REDIS_SSL:
