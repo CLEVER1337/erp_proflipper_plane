@@ -69,7 +69,7 @@ deploy-plane:
       if [ "$CI_COMMIT_BRANCH" = "dev_env" ]; then
         CONTAINER_NAME_VALUE="${CONTAINER_NAME_DEV:-erp-plane-api-dev}"
         SERVICE_PORT_VALUE="${SERVICE_PORT_DEV:-10300}"
-        DB_NAME_VALUE="${DB_NAME_DEV:-}"
+        DB_NAME_VALUE="${PLANE_DB_NAME_DEV:-erp_plane_DEV}"
         USER_SERVICE_URL_VALUE="${USER_SERVICE_URL_DEV:-http://127.0.0.1:10237}"
         REDIS_DB_VALUE="${REDIS_DB_DEV:-4}"
         IMAGE_ENV_TAG="$DEV_IMAGE_TAG"
