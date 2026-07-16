@@ -1,0 +1,301 @@
+image: docker:24.0.7
+
+services:
+  - name: docker:24.0.7-dind
+    command: ["--tls=false"]
+
+variables:
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_TLS_CERTDIR: ""
+  DOCKER_DRIVER: overlay2
+  DOCKER_REGISTRY: "containerregistry.gitlab-acrelis.ru"
+  IMAGE_TAG: "$DOCKER_REGISTRY/$CI_PROJECT_PATH:$CI_COMMIT_SHORT_SHA"
+  IMAGE_LATEST: "$DOCKER_REGISTRY/$CI_PROJECT_PATH:latest"
+  HEALTHCHECK_URL: "http://${DEPLOY_HOST}:${SERVICE_PORT}/health"
+  HEALTHCHECK_TIMEOUT: "60"
+  IMAGE_ROLLBACK: "$DOCKER_REGISTRY/$CI_PROJECT_PATH:rollback"
+
+stages:
+  - pre-test
+  - build
+  - test
+  - deploy
+  - healthcheck
+
+pre-test:
+  stage: pre-test
+  tags:
+    - docker
+  script:
+    - apk add --no-cache curl
+    - echo "🔍 Проверка resolv.conf:" && cat /etc/resolv.conf
+    - echo "🔍 Проверка services:" && getent hosts docker || echo "❌ docker не резолвится"
+    - echo "🔍 Попытка curl к dind:" && curl -v http://docker:2375/v1.24/info || true
+    - docker info
+    - echo "=== Network test ===" && docker run --rm alpine sh -c "apk add curl && curl -sf --connect-timeout 10 https://api.nuget.org/v3/index.json"
+    - echo "=== Disk ===" && docker run --rm alpine df -h /
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: always
+# ────────────────────────────────────────────────────────────────────────
+# СТЕЙДЖ 1: СБОРКА ОБРАЗА
+# ────────────────────────────────────────────────────────────────────────
+build:
+  stage: build
+  tags:
+    - docker
+  before_script:
+    - echo "$CI_JOB_TOKEN" | docker login -u gitlab-ci-token --password-stdin "$DOCKER_REGISTRY"
+  script:
+    - echo "🏗️ Сборка образа $IMAGE_TAG"
+    - docker build -t "$IMAGE_TAG" .
+    - echo "📤 Пушим образ $IMAGE_TAG"
+    - docker push "$IMAGE_TAG"
+    - echo "🏷️  Тегируем как latest"
+    - docker tag "$IMAGE_TAG" "$IMAGE_LATEST"
+    - docker push "$IMAGE_LATEST"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: always
+
+# ────────────────────────────────────────────────────────────────────────
+# СТЕЙДЖ 2: ТЕСТЫ
+# ────────────────────────────────────────────────────────────────────────
+dotnet-test-job:
+  stage: test
+  tags:
+    - linux
+    - deploy
+  image: mcr.microsoft.com/dotnet/sdk:9.0
+  script:
+    - echo "🧪 Запуск тестов..."
+    - dotnet test --configuration Release --no-build --verbosity normal
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: always
+  allow_failure: false
+
+unit-test-job:
+  stage: test
+  tags:
+    - linux
+    - deploy
+  script:
+    - echo "Code coverage test is not allowed"
+
+lint-test-job:
+  stage: test
+  tags:
+    - linux
+    - deploy
+  script:
+    - echo "No lint tests found."
+
+# ────────────────────────────────────────────────────────────────────────
+# СТЕЙДЖ 3: ДЕПЛОЙ
+# ────────────────────────────────────────────────────────────────────────
+deploy:
+  stage: deploy
+  tags:
+    - linux
+    - deploy
+  script:
+    - |
+      echo "🚀 Деплой $SERVICE_NAME на $DEPLOY_HOST (HOST NETWORK MODE)"
+      
+      # Передаём все необходимые переменные в окружение удалённой сессии
+      ssh -o StrictHostKeyChecking=yes -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+        CONTAINER_NAME="$CONTAINER_NAME" \
+        SERVICE_PORT="$SERVICE_PORT" \
+        IMAGE_TAG="$IMAGE_TAG" \
+        IMAGE_ROLLBACK="$IMAGE_ROLLBACK" \
+        DOCKER_REGISTRY="$DOCKER_REGISTRY" \
+        CI_REGISTRY_USER="$CI_REGISTRY_USER" \
+        CI_REGISTRY_PASSWORD="$CI_REGISTRY_PASSWORD" \
+        DB_HOST="$DB_HOST" \
+        DB_PORT="$DB_PORT" \
+        DB_USER="$DB_USER" \
+        DB_NAME="$DB_NAME" \
+        DB_PASSWORD="$DB_PASSWORD" \
+        JWT_KEY="$JWT_KEY" \
+        MARINA_KEY="$MARINA_KEY" \
+        REDIS_HOST="$REDIS_HOST" \
+        REDIS_PORT="$REDIS_PORT" \
+        REDIS_PASSWORD="$REDIS_PASSWORD" \
+        bash -s << 'REMOTE_SCRIPT'
+        set -e  # Выход при первой же ошибке
+        
+        echo '🔐 Авторизация в registry...'
+        echo "${CI_REGISTRY_PASSWORD}" | docker login -u "${CI_REGISTRY_USER}" --password-stdin "${DOCKER_REGISTRY}"
+        
+        echo '📥 Pull нового образа...'
+        docker pull "${IMAGE_TAG}"
+        
+        # Сохраняем текущий образ для отката
+        if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+          CURRENT_IMAGE=$(docker inspect --format='{{.Image}}' "${CONTAINER_NAME}" 2>/dev/null || true)
+          if [ -n "${CURRENT_IMAGE}" ]; then
+            echo "🔖 Сохраняем текущий образ как ${IMAGE_ROLLBACK} для отката"
+            docker tag "${CURRENT_IMAGE}" "${IMAGE_ROLLBACK}"
+          else
+            echo '⚠️ Не удалось определить образ текущего контейнера'
+          fi
+        else
+          echo "ℹ️ Контейнер ${CONTAINER_NAME} не существует (первый деплой?)"
+        fi
+        
+        echo '⏹️ Останавливаем старый контейнер...'
+        docker stop "${CONTAINER_NAME}" 2>/dev/null || true
+        docker rm "${CONTAINER_NAME}" 2>/dev/null || true
+        
+        echo '🚀 Запуск НОВОГО контейнера в HOST NETWORK MODE...'
+        docker run -d \
+          --name "${CONTAINER_NAME}" \
+          --network host \
+          --restart unless-stopped \
+          -e ASPNETCORE_ENVIRONMENT=Production \
+          -e "ASPNETCORE_URLS=http://*:${SERVICE_PORT}" \
+          -e "DOCUMENT_SERVICE_PORT=${SERVICE_PORT}" \
+          -e "DB_HOST=${DB_HOST}" \
+          -e "DB_PORT=${DB_PORT}" \
+          -e "DB_USER=${DB_USER}" \
+          -e "DB_NAME=${DB_NAME}" \
+          -e "DB_PASSWORD=${DB_PASSWORD}" \
+          -e "JWT_KEY=${JWT_KEY}" \
+          -e "MARINA_KEY=${MARINA_KEY}" \
+          -e "REDIS_HOST=${REDIS_HOST}" \
+          -e "REDIS_PORT=${REDIS_PORT}" \
+          -e "REDIS_PASSWORD=${REDIS_PASSWORD}" \
+          "${IMAGE_TAG}"
+        
+        echo "⏳ Ожидание готовности сервиса на порту ${SERVICE_PORT}..."
+        MAX_ATTEMPTS=30
+        ATTEMPT=0
+        while [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; do
+          if ss -tulpn 2>/dev/null | grep -q ":${SERVICE_PORT} "; then
+            echo "✅ Порт ${SERVICE_PORT} теперь слушается"
+            break
+          fi
+          ATTEMPT=$((ATTEMPT + 1))
+          echo "⏳ Попытка ${ATTEMPT}/${MAX_ATTEMPTS} порт ещё не активен, ждём 5с..."
+          sleep 5
+        done
+        
+        # Если порт не поднялся — выводим диагностику и падаем
+        if [ "${ATTEMPT}" -eq "${MAX_ATTEMPTS}" ]; then
+          echo "❌ Порт ${SERVICE_PORT} не начал слушаться за $((MAX_ATTEMPTS * 5)) секунд"
+          echo ""
+          echo "🔍 === ДИАГНОСТИКА ==="
+          echo "→ docker ps:"
+          docker ps --filter name="${CONTAINER_NAME}" --format "table {{.Names}}\t{{.Status}}"
+          echo ""
+          echo "→ ss -tulpn | grep ${SERVICE_PORT}:"
+          ss -tulpn 2>/dev/null | grep ":${SERVICE_PORT}" || echo "   [порт не найден в ss]"
+          echo ""
+          echo "→ Последние 50 строк лога контейнера:"
+          docker logs --tail 50 "${CONTAINER_NAME}" 2>&1 | sed 's/^/   /'
+          echo ""
+          echo "→ Проверка binding внутри контейнера:"
+          docker exec "${CONTAINER_NAME}" sh -c "ss -tulpn 2>/dev/null || netstat -tulpn 2>/dev/null" 2>&1 | sed 's/^/   /' || echo "   [не удалось выполнить внутри контейнера]"
+          echo "====================="
+          
+          exit 1
+        fi
+        
+        echo '✅ Контейнер запущен и готов к работе!'
+        docker logout "${DOCKER_REGISTRY}"
+      REMOTE_SCRIPT
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: on_success
+
+# ────────────────────────────────────────────────────────────────────────
+# СТЕЙДЖ 4: HEALTHCHECK
+# ────────────────────────────────────────────────────────────────────────
+healthcheck:
+  stage: healthcheck
+  tags:
+    - linux
+    - deploy
+  image: curlimages/curl:latest
+  script:
+    - |
+      echo "🩺 Проверка здоровья сервиса на порту $SERVICE_PORT..."
+      echo "📍 URL: $HEALTHCHECK_URL"
+      START_TIME=$(date +%s)
+      TIMEOUT=$HEALTHCHECK_TIMEOUT
+      while [ $(( $(date +%s) - START_TIME )) -lt $TIMEOUT ]; do
+        if curl -sf --max-time 5 "$HEALTHCHECK_URL" > /dev/null; then
+          echo "✅ Healthcheck успешен! Сервис отвечает на $HEALTHCHECK_URL"
+          exit 0
+        fi
+        echo "⏳ Сервис ещё не готов, ждём 5 секунд..."
+        sleep 5
+      done
+      echo "❌ Healthcheck провален сервис не ответил за $TIMEOUT секунд"
+      echo "🔍 Пробуем curl с выводом ошибки:"
+      curl -v "$HEALTHCHECK_URL" || true
+      exit 1
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: on_success
+  allow_failure: true
+
+# ────────────────────────────────────────────────────────────────────────
+# ОТКАТ
+# ────────────────────────────────────────────────────────────────────────
+rollback:
+  stage: deploy
+  tags:
+    - linux
+    - deploy
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache openssh-client
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan -p $DEPLOY_PORT $DEPLOY_HOST >> ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+  script:
+    - |
+      echo "🔄 ОТКАТ $SERVICE_NAME на ПРЕДЫДУЩУЮ РАБОЧУЮ ВЕРСИЮ ($IMAGE_ROLLBACK)..."
+      
+      ssh -p $DEPLOY_PORT $DEPLOY_USER@$DEPLOY_HOST "
+        if ! docker image inspect $IMAGE_ROLLBACK >/dev/null 2>&1; then
+          echo '❌ КРИТИЧЕСКАЯ ОШИБКА Образ $IMAGE_ROLLBACK не найден!'
+          echo 'Возможно, это первый деплой или образ был удалён.'
+          echo 'Проверьте логи предыдущего деплоя — был ли сохранён образ?'
+          exit 1
+        fi
+        
+        echo '⏹️ Останавливаем текущий (сломанный) контейнер...'
+        docker stop $CONTAINER_NAME 2>/dev/null || true
+        docker rm $CONTAINER_NAME 2>/dev/null || true
+        
+        echo '🚀 Запускаем ПРЕДЫДУЩУЮ РАБОЧУЮ ВЕРСИЮ из $IMAGE_ROLLBACK...'
+        docker run -d \
+          --name $CONTAINER_NAME \
+          --network host \
+          --restart unless-stopped \
+          -e ASPNETCORE_ENVIRONMENT=Production \
+          -e ASPNETCORE_URLS=http://*:$SERVICE_PORT \
+          -e DB_HOST='$DB_HOST' \
+          -e DB_PORT='$DB_PORT' \
+          -e DB_USER='$DB_USER' \
+          -e DB_PASSWORD='$DB_PASSWORD' \
+          -e JWT_KEY='$JWT_KEY' \
+          $IMAGE_ROLLBACK
+        
+        echo '✅ Откат завершён! Проверка статуса:'
+        sleep 3
+        docker ps --filter name=$CONTAINER_NAME --format 'table {{.Names}}\t{{.Status}}'
+        echo '🔍 Проверка порта:'
+        ss -tulpn | grep ':$SERVICE_PORT' || echo '⚠️ Порт не слушается'
+      "
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: on_failure
+  when: manual
+  allow_failure: true
