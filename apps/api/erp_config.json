@@ -1,5 +1,5 @@
 {
-  "_comment": "Plane NON-SECRET config, committed. Loaded into env by settings/common.py. Secrets (SECRET_KEY, ERP_GATEWAY_TOKEN, INTEGRATION_API_KEY, ERP_EMPLOYEES, DB_*) come from env — NOT here (public repo). Real env overrides any value here.",
+  "_comment": "Plane NON-SECRET config, committed. Loaded into env by settings/common.py. Secrets (SECRET_KEY, ERP_GATEWAY_TOKEN, INTEGRATION_API_KEY, DB_*) come from env — NOT here (public repo). Real env overrides any value here.",
 
   "DEBUG": "0",
   "PORT": "8000",

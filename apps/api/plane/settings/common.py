@@ -30,9 +30,10 @@ _logger = logging.getLogger("plane")
 # ERP config: optionally load a JSON file into the environment so Plane can be
 # configured from erp_config.json (analog of the .NET services' appsettings.json)
 # instead of many -e flags. Real env vars still win (setdefault), so nothing breaks.
-# DB_* creds are intentionally NOT expected here — they stay as env, like the ERP
-# services keep their DB block in .env. Non-string values (e.g. ERP_EMPLOYEES list)
-# are re-serialised to JSON strings, since env vars are strings.
+# Secrets (SECRET_KEY, ERP_GATEWAY_TOKEN, INTEGRATION_API_KEY) and DB_* are
+# intentionally NOT here — they come from env (public repo), like the ERP services
+# keep their DB block in .env. Non-string values are re-serialised to JSON strings,
+# since env vars are strings.
 import json as _json  # noqa: E402
 _erp_cfg_path = os.environ.get("ERP_CONFIG_JSON", os.path.join(os.path.dirname(BASE_DIR), "erp_config.json"))
 if os.path.exists(_erp_cfg_path):
