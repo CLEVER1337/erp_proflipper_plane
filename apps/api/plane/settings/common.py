@@ -8,6 +8,7 @@
 import ipaddress
 import logging
 import os
+from urllib.parse import quote
 from urllib.parse import urlparse
 from urllib.parse import urljoin
 
@@ -26,6 +27,25 @@ from plane.utils.url import is_valid_url
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 _logger = logging.getLogger("plane")
+
+# ERP config: optionally load a JSON file into the environment so Plane can be
+# configured from erp_config.json (analog of the .NET services' appsettings.json)
+# instead of many -e flags. Real env vars still win (setdefault), so nothing breaks.
+# Secrets (SECRET_KEY, ERP_GATEWAY_TOKEN, INTEGRATION_API_KEY) and DB_* are
+# intentionally NOT here — they come from env (public repo), like the ERP services
+# keep their DB block in .env. Non-string values are re-serialised to JSON strings,
+# since env vars are strings.
+import json as _json  # noqa: E402
+_erp_cfg_path = os.environ.get("ERP_CONFIG_JSON", os.path.join(os.path.dirname(BASE_DIR), "erp_config.json"))
+if os.path.exists(_erp_cfg_path):
+    try:
+        with open(_erp_cfg_path) as _f:
+            for _k, _v in _json.load(_f).items():
+                if _k.startswith("_"):
+                    continue  # skip doc keys like "_comment"
+                os.environ.setdefault(_k, _v if isinstance(_v, str) else _json.dumps(_v))
+    except Exception as _e:  # never block startup on a bad/partial config file
+        _logger.warning("ERP config not loaded from %s: %s", _erp_cfg_path, _e)
 
 # Secret Key — use `or` so an explicitly empty env var is treated the same as unset,
 # falling back to a random key rather than passing "" to Django (GHSA-cmwv-pjmw-8483).
@@ -201,21 +221,18 @@ SITE_ID = 1
 # User Model
 AUTH_USER_MODEL = "db.User"
 
-# Database
-if bool(os.environ.get("DATABASE_URL")):
-    # Parse database configuration from $DATABASE_URL
-    DATABASES = {"default": dj_database_url.config()}
-else:
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": os.environ.get("POSTGRES_DB"),
-            "USER": os.environ.get("POSTGRES_USER"),
-            "PASSWORD": os.environ.get("POSTGRES_PASSWORD"),
-            "HOST": os.environ.get("POSTGRES_HOST"),
-            "PORT": os.environ.get("POSTGRES_PORT", "5432"),
-        }
+# Database — ERP-style env vars (DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD),
+# matching the other ERP microservices instead of Plane's POSTGRES_* / DATABASE_URL.
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": os.environ.get("DB_NAME"),
+        "USER": os.environ.get("DB_USER"),
+        "PASSWORD": os.environ.get("DB_PASSWORD"),
+        "HOST": os.environ.get("DB_HOST"),
+        "PORT": os.environ.get("DB_PORT", "5432"),
     }
+}
 
 
 if os.environ.get("ENABLE_READ_REPLICA", "0") == "1":
@@ -238,9 +255,15 @@ if os.environ.get("ENABLE_READ_REPLICA", "0") == "1":
     MIDDLEWARE.append("plane.middleware.db_routing.ReadReplicaRoutingMiddleware")
 
 
-# Redis Config
-REDIS_URL = os.environ.get("REDIS_URL")
-REDIS_SSL = REDIS_URL and "rediss" in REDIS_URL
+# Redis Config. Prod and dev use separate logical databases on the shared ERP
+# Redis instance; credentials stay in GitLab variables and never enter the image.
+_redis_host = os.environ.get("REDIS_HOST", "127.0.0.1")
+_redis_port = os.environ.get("REDIS_PORT", "6379")
+_redis_db = os.environ.get("REDIS_DB", "3")
+_redis_password = os.environ.get("REDIS_PASSWORD", "")
+_redis_auth = f":{quote(_redis_password, safe='')}@" if _redis_password else ""
+REDIS_URL = f"redis://{_redis_auth}{_redis_host}:{_redis_port}/{_redis_db}"
+REDIS_SSL = False
 
 if REDIS_SSL:
     CACHES = {
@@ -333,6 +356,14 @@ CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_ACCEPT_CONTENT = ["application/json"]
+
+# ERP deploy: run the API as a single container without a broker/worker.
+# With eager mode every .delay() runs synchronously in-process, so issue
+# create/update keeps working without RabbitMQ or a celery worker. Eager task
+# failures must NOT propagate into the HTTP request (e.g. email with no SMTP,
+# unregistered webhooks), hence EAGER_PROPAGATES stays False.
+CELERY_TASK_ALWAYS_EAGER = int(os.environ.get("CELERY_TASK_ALWAYS_EAGER", "0")) == 1
+CELERY_TASK_EAGER_PROPAGATES = False
 
 
 CELERY_IMPORTS = (

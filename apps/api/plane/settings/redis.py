@@ -19,6 +19,7 @@ def redis_instance():
             ssl_cert_reqs=None,
         )
     else:
-        ri = redis.Redis.from_url(settings.REDIS_URL, db=0)
+        # Honour the db index from REDIS_URL (ERP deploy uses /3), don't force db 0.
+        ri = redis.Redis.from_url(settings.REDIS_URL)
 
     return ri
