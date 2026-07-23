@@ -578,9 +578,10 @@ ATTACHMENT_MIME_TYPES = [
 # Seed directory path
 SEED_DIR = os.path.join(BASE_DIR, "seeds")
 
-ENABLE_DRF_SPECTACULAR = os.environ.get("ENABLE_DRF_SPECTACULAR", "0") == "1"
+# drf-spectacular (OpenAPI schema + Swagger/ReDoc) is always enabled,
+# independent of the ENABLE_DRF_SPECTACULAR env var.
+ENABLE_DRF_SPECTACULAR = True
 
-if ENABLE_DRF_SPECTACULAR:
-    REST_FRAMEWORK["DEFAULT_SCHEMA_CLASS"] = "drf_spectacular.openapi.AutoSchema"
-    INSTALLED_APPS.append("drf_spectacular")
-    from .openapi import SPECTACULAR_SETTINGS  # noqa: F401
+REST_FRAMEWORK["DEFAULT_SCHEMA_CLASS"] = "drf_spectacular.openapi.AutoSchema"
+INSTALLED_APPS.append("drf_spectacular")
+from .openapi import SPECTACULAR_SETTINGS  # noqa: F401, E402
