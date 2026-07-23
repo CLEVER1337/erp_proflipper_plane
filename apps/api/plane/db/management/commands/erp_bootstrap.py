@@ -84,7 +84,7 @@ class Command(BaseCommand):
                 tok.save(update_fields=["token"])
         else:
             tok, _ = APIToken.objects.get_or_create(user=bot, workspace=ws, label="erp-gateway")
-        self._log(f"workspace={ws.slug} token={tok.token}")
+        self._log(f"workspace={ws.slug} gateway_token_ready=true")
 
         # 4. project + default states (states are NOT auto-seeded on ORM create)
         project, created = Project.objects.get_or_create(

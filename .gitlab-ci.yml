@@ -1,0 +1,255 @@
+image: docker:24.0.7
+
+services:
+  - name: docker:24.0.7-dind
+    command: ["--tls=false"]
+
+stages:
+  - build
+  - deploy
+  - healthcheck
+
+workflow:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "dev_env"'
+    - when: never
+
+variables:
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_TLS_CERTDIR: ""
+  DOCKER_DRIVER: overlay2
+  DOCKER_BUILDKIT: "1"
+  BUILDKIT_PROGRESS: plain
+  DOCKER_REGISTRY: "containerregistry.gitlab-acrelis.ru"
+  PROD_IMAGE_TAG: "prod-latest"
+  DEV_IMAGE_TAG: "dev-latest"
+
+build-plane-image:
+  stage: build
+  tags:
+    - docker
+  before_script:
+    - echo "$CI_JOB_TOKEN" | docker login -u gitlab-ci-token --password-stdin "$DOCKER_REGISTRY"
+  script:
+    - |
+      set -eu
+      if [ "$CI_COMMIT_BRANCH" = "dev_env" ]; then
+        IMAGE_ENV_TAG="$DEV_IMAGE_TAG"
+      else
+        IMAGE_ENV_TAG="$PROD_IMAGE_TAG"
+      fi
+
+      IMAGE_TAG="$DOCKER_REGISTRY/$CI_PROJECT_PATH:$CI_COMMIT_SHORT_SHA"
+      IMAGE_LATEST="$DOCKER_REGISTRY/$CI_PROJECT_PATH:$IMAGE_ENV_TAG"
+      CACHE_IMAGE="$DOCKER_REGISTRY/$CI_PROJECT_PATH:cache-$IMAGE_ENV_TAG"
+
+      docker pull "$CACHE_IMAGE" || true
+      docker pull "$IMAGE_LATEST" || true
+      docker build \
+        --build-arg BUILDKIT_INLINE_CACHE=1 \
+        --cache-from "$CACHE_IMAGE" \
+        --cache-from "$IMAGE_LATEST" \
+        -t "$IMAGE_TAG" \
+        -t "$IMAGE_LATEST" \
+        -t "$CACHE_IMAGE" \
+        .
+      docker push "$IMAGE_TAG"
+      docker push "$IMAGE_LATEST"
+      docker push "$CACHE_IMAGE"
+
+deploy-plane:
+  stage: deploy
+  tags:
+    - linux
+    - deploy
+  script:
+    - |
+      set -euo pipefail
+
+      if [ "$CI_COMMIT_BRANCH" = "dev_env" ]; then
+        CONTAINER_NAME_VALUE="${CONTAINER_NAME_DEV:-erp-plane-api-dev}"
+        SERVICE_PORT_VALUE="${SERVICE_PORT_DEV:-10300}"
+        DB_NAME_VALUE="${PLANE_DB_NAME_DEV:-erp_plane_DEV}"
+        USER_SERVICE_URL_VALUE="${USER_SERVICE_URL_DEV:-http://127.0.0.1:10237}"
+        REDIS_DB_VALUE="${REDIS_DB_DEV:-4}"
+        IMAGE_ENV_TAG="$DEV_IMAGE_TAG"
+        IMAGE_ROLLBACK_TAG="rollback-dev"
+      else
+        CONTAINER_NAME_VALUE="${CONTAINER_NAME:-}"
+        SERVICE_PORT_VALUE="${SERVICE_PORT:-}"
+        DB_NAME_VALUE="${DB_NAME:-}"
+        USER_SERVICE_URL_VALUE="${USER_SERVICE_URL_PROD:-http://127.0.0.1:7237}"
+        REDIS_DB_VALUE="${REDIS_DB_PROD:-3}"
+        IMAGE_ENV_TAG="$PROD_IMAGE_TAG"
+        IMAGE_ROLLBACK_TAG="rollback-prod"
+      fi
+
+      [ -n "$CONTAINER_NAME_VALUE" ] || { echo "CONTAINER_NAME is required"; exit 1; }
+      [ -n "$SERVICE_PORT_VALUE" ] || { echo "SERVICE_PORT is required"; exit 1; }
+      [ -n "$DB_NAME_VALUE" ] || { echo "DB_NAME is required"; exit 1; }
+      : "${DB_HOST:?DB_HOST is required}"
+      : "${DB_PORT:?DB_PORT is required}"
+      : "${DB_USER:?DB_USER is required}"
+      : "${DB_PASSWORD:?DB_PASSWORD is required}"
+      : "${SECRET_KEY:?SECRET_KEY is required}"
+      : "${ERP_GATEWAY_TOKEN:?ERP_GATEWAY_TOKEN is required}"
+      : "${INTEGRATION_API_KEY:?INTEGRATION_API_KEY is required}"
+      : "${REDIS_HOST:?REDIS_HOST is required}"
+      : "${REDIS_PORT:?REDIS_PORT is required}"
+      : "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"
+
+      IMAGE_TAG="$DOCKER_REGISTRY/$CI_PROJECT_PATH:$CI_COMMIT_SHORT_SHA"
+      IMAGE_LATEST="$DOCKER_REGISTRY/$CI_PROJECT_PATH:$IMAGE_ENV_TAG"
+      IMAGE_ROLLBACK="$DOCKER_REGISTRY/$CI_PROJECT_PATH:$IMAGE_ROLLBACK_TAG"
+
+      echo "Deploying $SERVICE_NAME from $CI_COMMIT_BRANCH to $DEPLOY_HOST:$SERVICE_PORT_VALUE"
+      encode() { printf '%s' "$1" | base64 | tr -d '\n'; }
+      emit() { printf '%s_B64=%s\n' "$1" "$(encode "$2")"; }
+
+      {
+        emit CONTAINER_NAME "$CONTAINER_NAME_VALUE"
+        emit SERVICE_PORT "$SERVICE_PORT_VALUE"
+        emit IMAGE_TAG "$IMAGE_TAG"
+        emit IMAGE_LATEST "$IMAGE_LATEST"
+        emit IMAGE_ROLLBACK "$IMAGE_ROLLBACK"
+        emit DOCKER_REGISTRY "$DOCKER_REGISTRY"
+        emit CI_REGISTRY_USER "$CI_REGISTRY_USER"
+        emit CI_REGISTRY_PASSWORD "$CI_REGISTRY_PASSWORD"
+        emit DB_HOST "$DB_HOST"
+        emit DB_PORT "$DB_PORT"
+        emit DB_USER "$DB_USER"
+        emit DB_NAME "$DB_NAME_VALUE"
+        emit DB_PASSWORD "$DB_PASSWORD"
+        emit SECRET_KEY "$SECRET_KEY"
+        emit ERP_GATEWAY_TOKEN "$ERP_GATEWAY_TOKEN"
+        emit INTEGRATION_API_KEY "$INTEGRATION_API_KEY"
+        emit USER_SERVICE_URL "$USER_SERVICE_URL_VALUE"
+        emit REDIS_HOST "$REDIS_HOST"
+        emit REDIS_PORT "$REDIS_PORT"
+        emit REDIS_PASSWORD "$REDIS_PASSWORD"
+        emit REDIS_DB "$REDIS_DB_VALUE"
+        cat << 'REMOTE_SCRIPT'
+        set -euo pipefail
+
+        decode() { printf '%s' "$1" | base64 -d; }
+        CONTAINER_NAME="$(decode "$CONTAINER_NAME_B64")"
+        SERVICE_PORT="$(decode "$SERVICE_PORT_B64")"
+        IMAGE_TAG="$(decode "$IMAGE_TAG_B64")"
+        IMAGE_LATEST="$(decode "$IMAGE_LATEST_B64")"
+        IMAGE_ROLLBACK="$(decode "$IMAGE_ROLLBACK_B64")"
+        DOCKER_REGISTRY="$(decode "$DOCKER_REGISTRY_B64")"
+        CI_REGISTRY_USER="$(decode "$CI_REGISTRY_USER_B64")"
+        CI_REGISTRY_PASSWORD="$(decode "$CI_REGISTRY_PASSWORD_B64")"
+        DB_HOST="$(decode "$DB_HOST_B64")"
+        DB_PORT="$(decode "$DB_PORT_B64")"
+        DB_USER="$(decode "$DB_USER_B64")"
+        DB_NAME="$(decode "$DB_NAME_B64")"
+        DB_PASSWORD="$(decode "$DB_PASSWORD_B64")"
+        SECRET_KEY="$(decode "$SECRET_KEY_B64")"
+        ERP_GATEWAY_TOKEN="$(decode "$ERP_GATEWAY_TOKEN_B64")"
+        INTEGRATION_API_KEY="$(decode "$INTEGRATION_API_KEY_B64")"
+        USER_SERVICE_URL="$(decode "$USER_SERVICE_URL_B64")"
+        REDIS_HOST="$(decode "$REDIS_HOST_B64")"
+        REDIS_PORT="$(decode "$REDIS_PORT_B64")"
+        REDIS_PASSWORD="$(decode "$REDIS_PASSWORD_B64")"
+        REDIS_DB="$(decode "$REDIS_DB_B64")"
+
+        ENV_FILE="$(mktemp)"
+        chmod 600 "$ENV_FILE"
+        cleanup() { rm -f "$ENV_FILE"; }
+        trap cleanup EXIT HUP INT TERM
+
+        write_env() {
+          local key="$1"
+          local value="$2"
+          case "$value" in
+            *$'\n'*|*$'\r'*) echo "Invalid newline in $key"; exit 1 ;;
+          esac
+          printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+        }
+
+        write_env PORT "$SERVICE_PORT"
+        write_env DB_HOST "$DB_HOST"
+        write_env DB_PORT "$DB_PORT"
+        write_env DB_USER "$DB_USER"
+        write_env DB_NAME "$DB_NAME"
+        write_env DB_PASSWORD "$DB_PASSWORD"
+        write_env SECRET_KEY "$SECRET_KEY"
+        write_env ERP_GATEWAY_TOKEN "$ERP_GATEWAY_TOKEN"
+        write_env INTEGRATION_API_KEY "$INTEGRATION_API_KEY"
+        write_env USER_SERVICE_URL "$USER_SERVICE_URL"
+        write_env REDIS_HOST "$REDIS_HOST"
+        write_env REDIS_PORT "$REDIS_PORT"
+        write_env REDIS_PASSWORD "$REDIS_PASSWORD"
+        write_env REDIS_DB "$REDIS_DB"
+        write_env WEB_URL "http://127.0.0.1:$SERVICE_PORT"
+        write_env ALLOWED_HOSTS "*"
+
+        echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$DOCKER_REGISTRY"
+        docker pull "$IMAGE_TAG"
+
+        if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+          CURRENT_IMAGE="$(docker inspect --format='{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+          if [ -n "$CURRENT_IMAGE" ]; then
+            docker tag "$CURRENT_IMAGE" "$IMAGE_ROLLBACK" || true
+          fi
+        fi
+
+        docker stop "$CONTAINER_NAME" 2>/dev/null || true
+        docker rm "$CONTAINER_NAME" 2>/dev/null || true
+
+        start_container() {
+          local image="$1"
+          docker run -d \
+            --name "$CONTAINER_NAME" \
+            --network host \
+            --restart unless-stopped \
+            --env-file "$ENV_FILE" \
+            "$image"
+        }
+
+        start_container "$IMAGE_TAG"
+        for attempt in $(seq 1 120); do
+          if curl -fsS --max-time 5 "http://127.0.0.1:$SERVICE_PORT/" >/dev/null; then
+            docker ps --filter name="$CONTAINER_NAME" --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+            docker logout "$DOCKER_REGISTRY"
+            exit 0
+          fi
+          sleep 5
+        done
+
+        echo "Plane did not become healthy on port $SERVICE_PORT"
+        docker ps -a --filter name="$CONTAINER_NAME" --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+        docker logs --tail 120 "$CONTAINER_NAME" 2>&1 || true
+        docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+
+        if docker image inspect "$IMAGE_ROLLBACK" >/dev/null 2>&1; then
+          echo "Restoring rollback image"
+          start_container "$IMAGE_ROLLBACK"
+        fi
+        docker logout "$DOCKER_REGISTRY"
+        exit 1
+      REMOTE_SCRIPT
+      } | ssh -o StrictHostKeyChecking=yes -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" bash -s
+
+healthcheck-plane:
+  stage: healthcheck
+  tags:
+    - linux
+    - deploy
+  script:
+    - |
+      set -eu
+      if [ "$CI_COMMIT_BRANCH" = "dev_env" ]; then
+        SERVICE_PORT_VALUE="${SERVICE_PORT_DEV:-10300}"
+      else
+        SERVICE_PORT_VALUE="${SERVICE_PORT:-}"
+      fi
+      [ -n "$SERVICE_PORT_VALUE" ] || { echo "SERVICE_PORT is required"; exit 1; }
+
+      ssh -o StrictHostKeyChecking=yes -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+        SERVICE_PORT="$SERVICE_PORT_VALUE" \
+        bash -s << 'REMOTE_SCRIPT'
+        set -eu
+        curl -fsS --max-time 10 "http://127.0.0.1:$SERVICE_PORT/"
+      REMOTE_SCRIPT
