@@ -23,20 +23,27 @@ urlpatterns = [
     path("", include("plane.web.urls")),
 ]
 
-if settings.ENABLE_DRF_SPECTACULAR:
-    urlpatterns += [
-        path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
-        path(
-            "api/schema/swagger-ui/",
-            SpectacularSwaggerView.as_view(url_name="schema"),
-            name="swagger-ui",
-        ),
-        path(
-            "api/schema/redoc/",
-            SpectacularRedocView.as_view(url_name="schema"),
-            name="redoc",
-        ),
-    ]
+# OpenAPI schema + Swagger/ReDoc are always enabled, independent of the
+# ENABLE_DRF_SPECTACULAR flag.
+urlpatterns += [
+    path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
+    path(
+        "api/schema/swagger-ui/",
+        SpectacularSwaggerView.as_view(url_name="schema"),
+        name="swagger-ui",
+    ),
+    path(
+        "api/schema/redoc/",
+        SpectacularRedocView.as_view(url_name="schema"),
+        name="redoc",
+    ),
+    # Convenience alias: /swagger also serves the Swagger UI.
+    path(
+        "swagger/",
+        SpectacularSwaggerView.as_view(url_name="schema"),
+        name="swagger",
+    ),
+]
 
 if settings.DEBUG:
     try:
