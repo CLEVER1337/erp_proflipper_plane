@@ -203,7 +203,13 @@ deploy-plane:
         write_env CELERY_TASK_ALWAYS_EAGER "$CELERY_TASK_ALWAYS_EAGER"
         write_env ALLOWED_HOSTS "*"
 
-        echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$DOCKER_REGISTRY"
+        for attempt in 1 2 3 4 5; do
+          if echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$DOCKER_REGISTRY"; then
+            break
+          fi
+          [ "$attempt" -eq 5 ] && exit 1
+          sleep $((attempt * 5))
+        done
         docker pull "$IMAGE_TAG"
 
         if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
