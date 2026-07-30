@@ -29,7 +29,14 @@ build-plane-image:
   tags:
     - docker
   before_script:
-    - echo "$CI_JOB_TOKEN" | docker login -u gitlab-ci-token --password-stdin "$DOCKER_REGISTRY"
+    - |
+      for attempt in 1 2 3 4 5; do
+        if echo "$CI_JOB_TOKEN" | docker login -u gitlab-ci-token --password-stdin "$DOCKER_REGISTRY"; then
+          break
+        fi
+        [ "$attempt" -eq 5 ] && exit 1
+        sleep $((attempt * 5))
+      done
   script:
     - |
       set -eu
@@ -69,7 +76,7 @@ deploy-plane:
       if [ "$CI_COMMIT_BRANCH" = "dev_env" ]; then
         CONTAINER_NAME_VALUE="${CONTAINER_NAME_DEV:-erp-plane-api-dev}"
         SERVICE_PORT_VALUE="${SERVICE_PORT_DEV:-10300}"
-        DB_NAME_VALUE="${PLANE_DB_NAME_DEV:-erp_plane_DEV}"
+        DB_NAME_VALUE="${DB_NAME_DEV:-erp_plane_DEV}"
         USER_SERVICE_URL_VALUE="${USER_SERVICE_URL_DEV:-http://127.0.0.1:10237}"
         REDIS_DB_VALUE="${REDIS_DB_DEV:-4}"
         IMAGE_ENV_TAG="$DEV_IMAGE_TAG"
@@ -101,6 +108,9 @@ deploy-plane:
       IMAGE_TAG="$DOCKER_REGISTRY/$CI_PROJECT_PATH:$CI_COMMIT_SHORT_SHA"
       IMAGE_LATEST="$DOCKER_REGISTRY/$CI_PROJECT_PATH:$IMAGE_ENV_TAG"
       IMAGE_ROLLBACK="$DOCKER_REGISTRY/$CI_PROJECT_PATH:$IMAGE_ROLLBACK_TAG"
+      WEB_URL_VALUE="${WEB_URL:-http://127.0.0.1:$SERVICE_PORT_VALUE}"
+      CORS_ALLOWED_ORIGINS_VALUE="${CORS_ALLOWED_ORIGINS:-$WEB_URL_VALUE}"
+      CELERY_TASK_ALWAYS_EAGER_VALUE="${CELERY_TASK_ALWAYS_EAGER:-1}"
 
       echo "Deploying $SERVICE_NAME from $CI_COMMIT_BRANCH to $DEPLOY_HOST:$SERVICE_PORT_VALUE"
       encode() { printf '%s' "$1" | base64 | tr -d '\n'; }
@@ -128,6 +138,9 @@ deploy-plane:
         emit REDIS_PORT "$REDIS_PORT"
         emit REDIS_PASSWORD "$REDIS_PASSWORD"
         emit REDIS_DB "$REDIS_DB_VALUE"
+        emit WEB_URL "$WEB_URL_VALUE"
+        emit CORS_ALLOWED_ORIGINS "$CORS_ALLOWED_ORIGINS_VALUE"
+        emit CELERY_TASK_ALWAYS_EAGER "$CELERY_TASK_ALWAYS_EAGER_VALUE"
         cat << 'REMOTE_SCRIPT'
         set -euo pipefail
 
@@ -153,6 +166,9 @@ deploy-plane:
         REDIS_PORT="$(decode "$REDIS_PORT_B64")"
         REDIS_PASSWORD="$(decode "$REDIS_PASSWORD_B64")"
         REDIS_DB="$(decode "$REDIS_DB_B64")"
+        WEB_URL="$(decode "$WEB_URL_B64")"
+        CORS_ALLOWED_ORIGINS="$(decode "$CORS_ALLOWED_ORIGINS_B64")"
+        CELERY_TASK_ALWAYS_EAGER="$(decode "$CELERY_TASK_ALWAYS_EAGER_B64")"
 
         ENV_FILE="$(mktemp)"
         chmod 600 "$ENV_FILE"
@@ -182,7 +198,9 @@ deploy-plane:
         write_env REDIS_PORT "$REDIS_PORT"
         write_env REDIS_PASSWORD "$REDIS_PASSWORD"
         write_env REDIS_DB "$REDIS_DB"
-        write_env WEB_URL "http://127.0.0.1:$SERVICE_PORT"
+        write_env WEB_URL "$WEB_URL"
+        write_env CORS_ALLOWED_ORIGINS "$CORS_ALLOWED_ORIGINS"
+        write_env CELERY_TASK_ALWAYS_EAGER "$CELERY_TASK_ALWAYS_EAGER"
         write_env ALLOWED_HOSTS "*"
 
         echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$DOCKER_REGISTRY"
