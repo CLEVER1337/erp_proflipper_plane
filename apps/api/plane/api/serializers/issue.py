@@ -66,6 +66,12 @@ class IssueSerializer(BaseSerializer):
     type_id = serializers.PrimaryKeyRelatedField(
         source="type", queryset=IssueType.objects.all(), required=False, allow_null=True
     )
+    # `assignees` above is write-only, so a plain read of a work item never showed
+    # who it is assigned to. The list view prefetches assignees, so this is free.
+    assignee_ids = serializers.SerializerMethodField(read_only=True)
+
+    def get_assignee_ids(self, obj):
+        return [str(assignee.id) for assignee in obj.assignees.all()]
 
     class Meta:
         model = Issue
