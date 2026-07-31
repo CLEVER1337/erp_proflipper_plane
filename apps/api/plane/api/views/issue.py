@@ -339,6 +339,26 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
         return filters
 
     @staticmethod
+    def apply_involves(request, queryset):
+        """Filter to work items a given set of users is involved with.
+
+        "Involved" means assignee, creator or supervisor. The ERP needs this as one
+        predicate ("my tasks", "my department's tasks") and the ordinary filters are
+        ANDed together, so it cannot be expressed with `assignees` + `created_by`.
+        """
+        involves = request.GET.get("involves")
+        if not involves:
+            return queryset
+
+        user_ids = filter_valid_uuids([item for item in involves.split(",") if item != "null"])
+        if not user_ids:
+            return queryset
+
+        return queryset.filter(
+            Q(assignees__id__in=user_ids) | Q(created_by_id__in=user_ids) | Q(supervisor_id__in=user_ids)
+        ).distinct()
+
+    @staticmethod
     def apply_overdue(request, queryset):
         """Filter on the derived "overdue" flag.
 
@@ -445,8 +465,8 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
             Issue.issue_objects.filter(project_id=project_id, workspace__slug=slug).filter(**filters).distinct()
         )
 
-        issue_queryset = self.apply_overdue(request, issue_queryset)
-        total_issue_queryset = self.apply_overdue(request, total_issue_queryset)
+        issue_queryset = self.apply_overdue(request, self.apply_involves(request, issue_queryset))
+        total_issue_queryset = self.apply_overdue(request, self.apply_involves(request, total_issue_queryset))
 
         # Priority Ordering
         if order_by_param == "priority" or order_by_param == "-priority":
