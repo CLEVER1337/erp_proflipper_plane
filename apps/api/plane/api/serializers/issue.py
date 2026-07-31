@@ -67,11 +67,14 @@ class IssueSerializer(BaseSerializer):
         source="type", queryset=IssueType.objects.all(), required=False, allow_null=True
     )
     # `assignees` above is write-only, so a plain read of a work item never showed
-    # who it is assigned to. The list view prefetches assignees, so this is free.
+    # who it is assigned to.
     assignee_ids = serializers.SerializerMethodField(read_only=True)
 
     def get_assignee_ids(self, obj):
-        return [str(assignee.id) for assignee in obj.assignees.all()]
+        # Read through the join model, not the m2m: unassigning only soft-deletes the
+        # join row, and the m2m manager ignores deleted_at, so `obj.assignees` still
+        # returns people who were removed (and duplicates anyone re-added).
+        return [str(ia.assignee_id) for ia in obj.issue_assignee.all()]
 
     class Meta:
         model = Issue
