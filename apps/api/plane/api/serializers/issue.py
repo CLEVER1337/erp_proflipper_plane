@@ -118,6 +118,18 @@ class IssueSerializer(BaseSerializer):
                 project_id=self.context.get("project_id"), id__in=data["labels"]
             ).values_list("id", flat=True)
 
+        # ERP: the supervisor signs the task off, so they must be on the project
+        if (
+            data.get("supervisor")
+            and not ProjectMember.objects.filter(
+                project_id=self.context.get("project_id"),
+                is_active=True,
+                role__gte=15,
+                member_id=data.get("supervisor").id,
+            ).exists()
+        ):
+            raise serializers.ValidationError("Supervisor is not a member of the project")
+
         # Check state is from the project only else raise validation error
         if (
             data.get("state")
