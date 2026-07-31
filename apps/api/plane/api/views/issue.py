@@ -78,8 +78,10 @@ from plane.db.models import (
     CycleIssue,
     Workspace,
 )
+from plane.db.models.state import StateGroup
 from plane.settings.storage import S3Storage
 from plane.utils.path_validator import sanitize_filename
+from plane.utils.issue_filters import filter_valid_uuids, issue_filters
 from plane.utils.order_queryset import ACTIVITY_ORDER_BY_ALLOWLIST, sanitize_order_by
 from plane.bgtasks.storage_metadata_task import get_asset_object_metadata
 from .base import BaseAPIView
@@ -279,6 +281,55 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
             .order_by(self.kwargs.get("order_by", "-created_at"))
         ).distinct()
 
+    def build_filters(self, request):
+        """Query-param filters for the work item list.
+
+        Reuses the shared filter parser (state, state_group, assignees,
+        created_by, priority, labels, target_date ranges, ...) and adds the ERP
+        ones on top: the external entity a task is linked to and the supervisor
+        fields this fork added to Issue.
+        """
+        filters = issue_filters(request.GET, "GET")
+
+        external_source = request.GET.get("external_source")
+        if external_source:
+            filters["external_source"] = external_source
+
+        external_id = request.GET.get("external_id")
+        if external_id:
+            filters["external_id"] = external_id
+
+        supervisor = request.GET.get("supervisor")
+        if supervisor:
+            supervisors = filter_valid_uuids([item for item in supervisor.split(",") if item != "null"])
+            if supervisors:
+                filters["supervisor__in"] = supervisors
+
+        requires_approval = request.GET.get("requires_supervisor_approval")
+        if requires_approval:
+            filters["requires_supervisor_approval"] = requires_approval.lower() in ("true", "1", "yes")
+
+        return filters
+
+    @staticmethod
+    def apply_overdue(request, queryset):
+        """Filter on the derived "overdue" flag.
+
+        Overdue is not a state: a task keeps its real status when the deadline
+        passes, and overdue means "has a target date in the past and is neither
+        completed nor cancelled".
+        """
+        overdue = request.GET.get("overdue")
+        if not overdue:
+            return queryset
+
+        closed_groups = [StateGroup.COMPLETED.value, StateGroup.CANCELLED.value]
+        is_overdue = Q(target_date__lt=timezone.now().date()) & ~Q(state__group__in=closed_groups)
+
+        if overdue.lower() in ("true", "1", "yes"):
+            return queryset.filter(is_overdue)
+        return queryset.exclude(is_overdue)
+
     @work_item_docs(
         operation_id="list_work_items",
         summary="List work items",
@@ -313,7 +364,11 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
         external_id = request.GET.get("external_id")
         external_source = request.GET.get("external_source")
 
-        if external_id and external_source:
+        # Legacy single-object lookup by external id. Kept behind an explicit flag:
+        # it is only correct when the external id maps to exactly one work item,
+        # and an ERP entity (a lead, a project) normally has several tasks, so the
+        # ERP gateway asks for a filtered list instead.
+        if external_id and external_source and request.GET.get("external_lookup") == "single":
             issue = Issue.objects.get(
                 external_id=external_id,
                 external_source=external_source,
@@ -331,8 +386,11 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
 
         order_by_param = request.GET.get("order_by", "-created_at")
 
+        filters = self.build_filters(request)
+
         issue_queryset = (
             self.get_queryset()
+            .filter(**filters)
             .annotate(
                 cycle_id=Subquery(
                     CycleIssue.objects.filter(issue=OuterRef("id"), deleted_at__isnull=True).values("cycle_id")[:1]
@@ -355,7 +413,13 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
             )
         )
 
-        total_issue_queryset = Issue.issue_objects.filter(project_id=project_id, workspace__slug=slug)
+        # distinct: joins from the assignee/label filters would otherwise inflate the count
+        total_issue_queryset = (
+            Issue.issue_objects.filter(project_id=project_id, workspace__slug=slug).filter(**filters).distinct()
+        )
+
+        issue_queryset = self.apply_overdue(request, issue_queryset)
+        total_issue_queryset = self.apply_overdue(request, total_issue_queryset)
 
         # Priority Ordering
         if order_by_param == "priority" or order_by_param == "-priority":
