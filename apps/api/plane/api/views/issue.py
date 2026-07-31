@@ -76,6 +76,7 @@ from plane.db.models import (
     Project,
     ProjectMember,
     CycleIssue,
+    State,
     Workspace,
 )
 from plane.db.models.state import StateGroup
@@ -83,6 +84,7 @@ from plane.settings.storage import S3Storage
 from plane.utils.path_validator import sanitize_filename
 from plane.utils.issue_filters import filter_valid_uuids, issue_filters
 from plane.utils.order_queryset import ACTIVITY_ORDER_BY_ALLOWLIST, sanitize_order_by
+from plane.utils.uuid import is_valid_uuid
 from plane.bgtasks.storage_metadata_task import get_asset_object_metadata
 from .base import BaseAPIView
 from plane.utils.host import base_host
@@ -157,6 +159,31 @@ from plane.utils.openapi import (
     WORKSPACE_NOT_FOUND_RESPONSE,
 )
 from plane.bgtasks.work_item_link_task import crawl_work_item_link_title
+
+
+def resolve_actor_id(request, slug, project_id):
+    """ERP: who is credited in the work item history.
+
+    The ERP gateway talks to this API with a single bot token, so without an
+    explicit actor every change made from the ERP would be attributed to the bot
+    instead of the employee who made it. Callers may therefore pass `actor` (a
+    Plane user id) alongside the payload; anything invalid or outside the project
+    falls back to the authenticated user.
+    """
+    actor_id = request.data.get("actor") if isinstance(request.data, dict) else None
+    if not actor_id:
+        # DELETE carries no body, so the actor comes as a query param there
+        actor_id = request.GET.get("actor")
+    if not actor_id or not is_valid_uuid(str(actor_id)):
+        return str(request.user.id)
+
+    is_member = ProjectMember.objects.filter(
+        project_id=project_id,
+        workspace__slug=slug,
+        member_id=actor_id,
+        is_active=True,
+    ).exists()
+    return str(actor_id) if is_member else str(request.user.id)
 
 
 def user_has_issue_permission(user_id, project_id, issue=None, allowed_roles=None, allow_creator=True):
@@ -843,10 +870,11 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                 )
 
             serializer.save()
+            actor_id = resolve_actor_id(request, slug, project_id)
             issue_activity.delay(
                 type="issue.activity.updated",
                 requested_data=requested_data,
-                actor_id=str(request.user.id),
+                actor_id=actor_id,
                 issue_id=str(pk),
                 project_id=str(project_id),
                 current_instance=current_instance,
@@ -860,7 +888,7 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                 model_id=str(pk),
                 requested_data=request.data,
                 current_instance=current_instance,
-                actor_id=request.user.id,
+                actor_id=actor_id,
                 slug=slug,
                 origin=base_host(request=request, is_app=True),
             )
@@ -901,17 +929,166 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
         current_instance = json.dumps(IssueSerializer(issue).data, cls=DjangoJSONEncoder)
+        actor_id = resolve_actor_id(request, slug, project_id)
         issue.delete()
         issue_activity.delay(
             type="issue.activity.deleted",
             requested_data=json.dumps({"issue_id": str(pk)}),
-            actor_id=str(request.user.id),
+            actor_id=actor_id,
             issue_id=str(pk),
             project_id=str(project_id),
             current_instance=current_instance,
             epoch=int(timezone.now().timestamp()),
         )
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class IssueBulkStateAPIEndpoint(BaseAPIView):
+    """ERP: move several work items to the same state in one call.
+
+    Deliberately not a transaction — each item is updated on its own and the
+    response says which ones went through, so one stale id in a batch does not
+    throw away the rest. Every item still goes through the normal activity
+    pipeline, so the change and the shared comment land in each item's history.
+    """
+
+    model = Issue
+    webhook_event = "issue"
+    permission_classes = [ProjectEntityPermission]
+    serializer_class = IssueSerializer
+
+    def post(self, request, slug, project_id):
+        """Bulk change work item state"""
+        issue_ids = request.data.get("issue_ids") or []
+        state_id = request.data.get("state")
+        comment = (request.data.get("comment") or "").strip()
+
+        if not issue_ids:
+            return Response({"error": "issue_ids is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if not state_id:
+            return Response({"error": "state is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        project = Project.objects.get(pk=project_id, workspace__slug=slug)
+        state = State.objects.filter(pk=state_id, project_id=project_id, workspace__slug=slug).first()
+        if state is None:
+            return Response(
+                {"error": "State is not valid please pass a valid state_id"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        actor_id = resolve_actor_id(request, slug, project_id)
+        succeeded, failed = [], []
+
+        for issue_id in issue_ids:
+            issue = Issue.objects.filter(pk=issue_id, project_id=project_id, workspace__slug=slug).first()
+            if issue is None:
+                failed.append({"issue_id": str(issue_id), "error": "not_found"})
+                continue
+
+            current_instance = json.dumps(IssueSerializer(issue).data, cls=DjangoJSONEncoder)
+            serializer = IssueSerializer(
+                issue,
+                data={"state": str(state.id)},
+                context={"project_id": project_id, "workspace_id": project.workspace_id},
+                partial=True,
+            )
+            if not serializer.is_valid():
+                failed.append({"issue_id": str(issue_id), "error": "invalid"})
+                continue
+
+            serializer.save()
+            issue_activity.delay(
+                type="issue.activity.updated",
+                requested_data=json.dumps({"state": str(state.id)}),
+                actor_id=actor_id,
+                issue_id=str(issue.id),
+                project_id=str(project_id),
+                current_instance=current_instance,
+                epoch=int(timezone.now().timestamp()),
+                notification=True,
+                origin=base_host(request=request, is_app=True),
+            )
+            self._add_comment(request, project_id, issue.id, comment, actor_id)
+            succeeded.append(str(issue.id))
+
+        return Response({"succeeded": succeeded, "failed": failed}, status=status.HTTP_200_OK)
+
+    @staticmethod
+    def _add_comment(request, project_id, issue_id, comment, actor_id):
+        """Attach the shared comment to one work item, so it shows in its history."""
+        if not comment:
+            return
+
+        serializer = IssueCommentCreateSerializer(data={"comment_html": comment})
+        if not serializer.is_valid():
+            return
+
+        serializer.save(project_id=project_id, issue_id=issue_id, actor_id=actor_id)
+        issue_comment = IssueComment.objects.get(pk=serializer.instance.id)
+        issue_comment.created_by_id = actor_id
+        issue_comment.save(update_fields=["created_by"])
+
+        issue_activity.delay(
+            type="comment.activity.created",
+            requested_data=json.dumps(serializer.data, cls=DjangoJSONEncoder),
+            actor_id=actor_id,
+            issue_id=str(issue_id),
+            project_id=str(project_id),
+            current_instance=None,
+            epoch=int(timezone.now().timestamp()),
+            origin=base_host(request=request, is_app=True),
+        )
+
+
+class IssueBulkDeleteAPIEndpoint(BaseAPIView):
+    """ERP: delete several work items in one call.
+
+    Same partial-success contract as the bulk state endpoint.
+    """
+
+    model = Issue
+    webhook_event = "issue"
+    permission_classes = [ProjectEntityPermission]
+    serializer_class = IssueSerializer
+
+    def post(self, request, slug, project_id):
+        """Bulk delete work items"""
+        issue_ids = request.data.get("issue_ids") or []
+        if not issue_ids:
+            return Response({"error": "issue_ids is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        actor_id = resolve_actor_id(request, slug, project_id)
+        succeeded, failed = [], []
+
+        for issue_id in issue_ids:
+            issue = Issue.objects.filter(pk=issue_id, project_id=project_id, workspace__slug=slug).first()
+            if issue is None:
+                failed.append({"issue_id": str(issue_id), "error": "not_found"})
+                continue
+
+            if not user_has_issue_permission(
+                user_id=request.user.id,
+                project_id=project_id,
+                issue=issue,
+                allowed_roles=[ROLE.ADMIN.value],
+            ):
+                failed.append({"issue_id": str(issue_id), "error": "forbidden"})
+                continue
+
+            current_instance = json.dumps(IssueSerializer(issue).data, cls=DjangoJSONEncoder)
+            issue.delete()
+            issue_activity.delay(
+                type="issue.activity.deleted",
+                requested_data=json.dumps({"issue_id": str(issue_id)}),
+                actor_id=actor_id,
+                issue_id=str(issue_id),
+                project_id=str(project_id),
+                current_instance=current_instance,
+                epoch=int(timezone.now().timestamp()),
+            )
+            succeeded.append(str(issue_id))
+
+        return Response({"succeeded": succeeded, "failed": failed}, status=status.HTTP_200_OK)
 
 
 class LabelListCreateAPIEndpoint(BaseAPIView):

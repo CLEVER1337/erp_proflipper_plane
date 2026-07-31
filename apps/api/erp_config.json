@@ -10,7 +10,8 @@
   "CELERY_TASK_ALWAYS_EAGER": "1",
   "USE_MINIO": "0",
   "AWS_S3_ENDPOINT_URL": "",
-  "API_KEY_RATE_LIMIT": "60/minute",
+  "_comment_rate_limit": "The whole ERP talks to this API through one gateway bot token, so the limit is shared by every employee — a kanban board load alone is one request per column.",
+  "API_KEY_RATE_LIMIT": "600/minute",
 
   "ERP_WORKSPACE_SLUG": "erp",
   "ERP_PROJECT_IDENTIFIER": "TASK",
