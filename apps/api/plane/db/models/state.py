@@ -62,6 +62,61 @@ DEFAULT_STATES = [
 ]
 
 
+# ERP task states. Seeded on the ERP project by the `erp_bootstrap` command and
+# consumed by the ERP gateway (leadservice). `external_id` is the stable machine
+# key the gateway resolves states by, so renaming a state in the Plane UI does not
+# break the ERP contract. There is deliberately no "overdue" state: overdue is
+# derived from `target_date` plus the state group, so a task keeps its real status
+# when the deadline passes.
+ERP_STATE_SOURCE = "erp"
+
+ERP_TASK_STATES = [
+    {
+        "external_id": "new",
+        "name": "Новая",
+        "color": "#60646C",
+        "group": StateGroup.UNSTARTED.value,
+        "default": True,
+    },
+    {
+        "external_id": "in_progress",
+        "name": "В работе",
+        "color": "#F59E0B",
+        "group": StateGroup.STARTED.value,
+    },
+    {
+        "external_id": "on_approval",
+        "name": "На согласовании",
+        "color": "#3B82F6",
+        "group": StateGroup.STARTED.value,
+    },
+    {
+        "external_id": "on_supervisor_review",
+        "name": "На проверке руководителя",
+        "color": "#8B5CF6",
+        "group": StateGroup.STARTED.value,
+    },
+    {
+        "external_id": "returned",
+        "name": "Возвращена на доработку",
+        "color": "#EF4444",
+        "group": StateGroup.STARTED.value,
+    },
+    {
+        "external_id": "done",
+        "name": "Завершена",
+        "color": "#46A758",
+        "group": StateGroup.COMPLETED.value,
+    },
+    {
+        "external_id": "cancelled",
+        "name": "Отменена",
+        "color": "#9AA4BC",
+        "group": StateGroup.CANCELLED.value,
+    },
+]
+
+
 class StateManager(SoftDeletionManager):
     """Default manager - excludes triage states"""
 
