@@ -18,6 +18,8 @@ from plane.api.views import (
     WorkspaceIssueAPIEndpoint,
     IssueSearchEndpoint,
     IssueRelationListCreateAPIEndpoint,
+    IssueBulkStateAPIEndpoint,
+    IssueBulkDeleteAPIEndpoint,
 )
 
 # Deprecated url patterns
@@ -150,6 +152,17 @@ new_url_patterns = [
         "workspaces/<str:slug>/projects/<uuid:project_id>/work-items/<uuid:issue_id>/relations/",
         IssueRelationListCreateAPIEndpoint.as_view(http_method_names=["get", "post"]),
         name="work-item-relation-list",
+    ),
+    # ERP bulk actions
+    path(
+        "workspaces/<str:slug>/projects/<uuid:project_id>/work-items/bulk-state/",
+        IssueBulkStateAPIEndpoint.as_view(http_method_names=["post"]),
+        name="work-item-bulk-state",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<uuid:project_id>/work-items/bulk-delete/",
+        IssueBulkDeleteAPIEndpoint.as_view(http_method_names=["post"]),
+        name="work-item-bulk-delete",
     ),
 ]
 

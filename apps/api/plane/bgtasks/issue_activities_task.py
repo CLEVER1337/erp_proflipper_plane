@@ -226,6 +226,78 @@ def track_state(
         )
 
 
+# ERP: track changes in the task supervisor
+def track_supervisor(
+    requested_data,
+    current_instance,
+    issue_id,
+    project_id,
+    workspace_id,
+    actor_id,
+    issue_activities,
+    epoch,
+):
+    current_supervisor_id = current_instance.get("supervisor")
+    requested_supervisor_id = requested_data.get("supervisor")
+
+    if current_supervisor_id is not None and not is_valid_uuid(current_supervisor_id):
+        current_supervisor_id = None
+    if requested_supervisor_id is not None and not is_valid_uuid(requested_supervisor_id):
+        requested_supervisor_id = None
+
+    if current_supervisor_id != requested_supervisor_id:
+        new_supervisor = User.objects.filter(pk=requested_supervisor_id).first()
+        old_supervisor = User.objects.filter(pk=current_supervisor_id).first()
+
+        issue_activities.append(
+            IssueActivity(
+                issue_id=issue_id,
+                actor_id=actor_id,
+                verb="updated",
+                old_value=old_supervisor.display_name if old_supervisor else None,
+                new_value=new_supervisor.display_name if new_supervisor else None,
+                field="supervisor",
+                project_id=project_id,
+                workspace_id=workspace_id,
+                comment="updated the supervisor to",
+                old_identifier=old_supervisor.id if old_supervisor else None,
+                new_identifier=new_supervisor.id if new_supervisor else None,
+                epoch=epoch,
+            )
+        )
+
+
+# ERP: track changes in the "supervisor approval required" flag
+def track_requires_supervisor_approval(
+    requested_data,
+    current_instance,
+    issue_id,
+    project_id,
+    workspace_id,
+    actor_id,
+    issue_activities,
+    epoch,
+):
+    current_value = bool(current_instance.get("requires_supervisor_approval"))
+    requested_value = bool(requested_data.get("requires_supervisor_approval"))
+
+    if current_value != requested_value:
+        issue_activities.append(
+            IssueActivity(
+                issue_id=issue_id,
+                actor_id=actor_id,
+                verb="updated",
+                old_value=str(current_value).lower(),
+                new_value=str(requested_value).lower(),
+                field="requires_supervisor_approval",
+                project_id=project_id,
+                workspace_id=workspace_id,
+                comment="updated the supervisor approval requirement to",
+                epoch=epoch,
+            )
+        )
+
+
 # Track changes in issue target date
 def track_target_date(
     requested_data,
@@ -614,6 +686,9 @@ def update_issue_activity(
         "estimate_point": track_estimate_points,
         "archived_at": track_archive_at,
         "closed_to": track_closed_to,
+        # ERP fields
+        "supervisor": track_supervisor,
+        "requires_supervisor_approval": track_requires_supervisor_approval,
         # External endpoint keys
         "parent": track_parent,
         "state": track_state,

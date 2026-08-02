@@ -66,6 +66,15 @@ class IssueSerializer(BaseSerializer):
     type_id = serializers.PrimaryKeyRelatedField(
         source="type", queryset=IssueType.objects.all(), required=False, allow_null=True
     )
+    # `assignees` above is write-only, so a plain read of a work item never showed
+    # who it is assigned to.
+    assignee_ids = serializers.SerializerMethodField(read_only=True)
+
+    def get_assignee_ids(self, obj):
+        # Read through the join model, not the m2m: unassigning only soft-deletes the
+        # join row, and the m2m manager ignores deleted_at, so `obj.assignees` still
+        # returns people who were removed (and duplicates anyone re-added).
+        return [str(ia.assignee_id) for ia in obj.issue_assignee.all()]
 
     class Meta:
         model = Issue
@@ -117,6 +126,18 @@ class IssueSerializer(BaseSerializer):
             data["labels"] = Label.objects.filter(
                 project_id=self.context.get("project_id"), id__in=data["labels"]
             ).values_list("id", flat=True)
+
+        # ERP: the supervisor signs the task off, so they must be on the project
+        if (
+            data.get("supervisor")
+            and not ProjectMember.objects.filter(
+                project_id=self.context.get("project_id"),
+                is_active=True,
+                role__gte=15,
+                member_id=data.get("supervisor").id,
+            ).exists()
+        ):
+            raise serializers.ValidationError("Supervisor is not a member of the project")
 
         # Check state is from the project only else raise validation error
         if (

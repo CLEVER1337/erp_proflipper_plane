@@ -168,6 +168,18 @@ class Issue(ChangeTrackerMixin, ProjectBaseModel):
         null=True,
         blank=True,
     )
+    # ERP: the manager who signs the task off. Distinct from assignees (who do the
+    # work) and from created_by (who raised it) — one task has at most one.
+    supervisor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="supervised_issues",
+        null=True,
+        blank=True,
+    )
+    # ERP: when set, an assignee cannot move the task straight to the completed
+    # state — it goes to review and the supervisor approves or rejects it.
+    requires_supervisor_approval = models.BooleanField(default=False)
 
     issue_objects = IssueManager()
 
