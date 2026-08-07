@@ -8,7 +8,6 @@
 import ipaddress
 import logging
 import os
-from urllib.parse import quote
 from urllib.parse import urlparse
 from urllib.parse import urljoin
 
@@ -255,40 +254,18 @@ if os.environ.get("ENABLE_READ_REPLICA", "0") == "1":
     MIDDLEWARE.append("plane.middleware.db_routing.ReadReplicaRoutingMiddleware")
 
 
-# Redis Config. Endpoint and credentials are hardcoded to the same shared ERP
-# Redis the C# services talk to (UserService/TokenService Program.cs pin
-# "127.0.0.1:6379,password=gavno" the same way and ignore their REDIS_* env).
-# Env used to win here, and a REDIS_PASSWORD that the instance did not have made
-# every /api/v1 call die on AUTH inside the throttle. Only the logical database
-# stays env-driven, so prod (3) and dev (4) keep their key spaces apart from the
-# C# services (0).
-_redis_host = "127.0.0.1"
-_redis_port = "6379"
-_redis_password = "gavno"
-_redis_db = os.environ.get("REDIS_DB", "3")
-_redis_auth = f":{quote(_redis_password, safe='')}@" if _redis_password else ""
-REDIS_URL = f"redis://{_redis_auth}{_redis_host}:{_redis_port}/{_redis_db}"
-REDIS_SSL = False
-
-if REDIS_SSL:
-    CACHES = {
-        "default": {
-            "BACKEND": "django_redis.cache.RedisCache",
-            "LOCATION": REDIS_URL,
-            "OPTIONS": {
-                "CLIENT_CLASS": "django_redis.client.DefaultClient",
-                "CONNECTION_POOL_KWARGS": {"ssl_cert_reqs": False},
-            },
-        }
+# Cache. The ERP deploy runs no Redis of its own, so the cache is in-process
+# (Django's LocMemCache — the analog of IMemoryCache in the .NET services) and
+# `plane.settings.redis.redis_instance()` returns an in-process stand-in too.
+# Consequences, accepted deliberately: every gunicorn worker keeps its own copy,
+# and it is lost on restart. The only hot consumer here is ApiKeyRateThrottle, so
+# the effective rate limit is API_KEY_RATE_LIMIT * GUNICORN_WORKERS.
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "plane-default",
     }
-else:
-    CACHES = {
-        "default": {
-            "BACKEND": "django_redis.cache.RedisCache",
-            "LOCATION": REDIS_URL,
-            "OPTIONS": {"CLIENT_CLASS": "django_redis.client.DefaultClient"},
-        }
-    }
+}
 
 # Password validations
 AUTH_PASSWORD_VALIDATORS = [
