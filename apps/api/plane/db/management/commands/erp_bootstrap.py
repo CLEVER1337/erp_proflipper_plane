@@ -17,11 +17,9 @@ Config (env):
 """
 
 import os
-import uuid
 
 import requests
 from django.core.management.base import BaseCommand
-from django.db import transaction
 
 from plane.db.models import (
     APIToken,
@@ -33,9 +31,7 @@ from plane.db.models import (
     WorkspaceMember,
 )
 from plane.db.models.state import ERP_STATE_SOURCE, ERP_TASK_STATES
-
-ROLE_ADMIN = 20
-ROLE_MEMBER = 15
+from plane.utils.erp_provisioning import ROLE_ADMIN, ROLE_MEMBER, provision_employee
 
 
 class Command(BaseCommand):
@@ -43,51 +39,6 @@ class Command(BaseCommand):
 
     def _log(self, msg):
         self.stdout.write(f"[erp_bootstrap] {msg}")
-
-    def _unique_username(self, preferred, email):
-        """A username no other Plane user holds.
-
-        `username` is unique in Plane and unrelated to `email`, so two ERP logins
-        that collide (or a login equal to somebody else's email) must not abort
-        provisioning. Only used on create — an existing user keeps its username.
-        """
-        for candidate in (preferred, email):
-            if candidate and not User.objects.filter(username=candidate).exists():
-                return candidate
-        while True:
-            candidate = f"{email}-{uuid.uuid4().hex[:6]}"
-            if not User.objects.filter(username=candidate).exists():
-                return candidate
-
-    def _provision_employee(self, emp, email, erp_id, ws, project, user_service, api_key):
-        """Get-or-create one employee in Plane and push the ERP↔Plane pair back.
-
-        Lookup is by the already-lowercased email: `User.save()` lowercases what it
-        stores, so matching against the raw ERP email misses the existing row and
-        turns a no-op re-run into a create that trips the username unique index.
-        """
-        with transaction.atomic():
-            user = User.objects.filter(email=email).first()
-            if user is None:
-                username = self._unique_username(emp.get("username") or email, email)
-                user = User.objects.create(email=email, username=username)
-            if user.has_usable_password():
-                user.set_unusable_password()
-                user.save(update_fields=["password"])
-            WorkspaceMember.objects.get_or_create(workspace=ws, member=user, defaults={"role": ROLE_MEMBER})
-            ProjectMember.objects.get_or_create(project=project, member=user, defaults={"role": ROLE_MEMBER})
-
-        # outside the transaction: a rejected push must not discard a correctly
-        # provisioned Plane user, the next boot just re-pushes the same pair
-        resp = requests.post(
-            f"{user_service}/plane-map/upsert",
-            headers={"X-Api-Key": api_key},
-            json={"erpUserId": erp_id, "planeUserId": str(user.id), "planeEmail": email},
-            timeout=10,
-        )
-        if not resp.ok:
-            # 409 plane_user_already_mapped means two ERP users share one Plane user
-            raise RuntimeError(f"mapping push returned {resp.status_code}: {resp.text.strip()[:200]}")
 
     def _sync_erp_states(self, project, workspace, bot):
         """Ensure the ERP task states exist on the project.
@@ -230,7 +181,7 @@ class Command(BaseCommand):
             if not email or not erp_id:
                 continue
             try:
-                self._provision_employee(emp, email, erp_id, ws, project, user_service, api_key)
+                provision_employee(emp, email, erp_id, ws, project, user_service, api_key)
                 provisioned += 1
             except Exception as e:
                 failed += 1
