@@ -8,42 +8,39 @@ from django.db import migrations, models
 def supervisor_to_controllers(apps, schema_editor):
     """Carry every existing supervisor over as the first controller of that task.
 
-    Runs before the column is dropped, so nobody loses their approver.
+    Runs before the column is dropped, so nobody loses their approver. Plain SQL, not
+    the ORM: `Issue` declares only `issue_objects`, so the historical model built by
+    the migration executor has no `objects` manager at all.
     """
-    Issue = apps.get_model("db", "Issue")
-    IssueController = apps.get_model("db", "IssueController")
-
-    rows = [
-        IssueController(
-            issue_id=issue.id,
-            controller_id=issue.supervisor_id,
-            project_id=issue.project_id,
-            workspace_id=issue.workspace_id,
-            created_by_id=issue.created_by_id,
-        )
-        for issue in Issue.objects.filter(supervisor__isnull=False)
-        .only("id", "supervisor_id", "project_id", "workspace_id", "created_by_id")
-        .iterator(chunk_size=500)
-    ]
-    IssueController.objects.bulk_create(rows, batch_size=500, ignore_conflicts=True)
+    schema_editor.execute(
+        """
+        INSERT INTO issue_controllers
+            (id, created_at, updated_at, deleted_at,
+             created_by_id, updated_by_id, issue_id, controller_id, project_id, workspace_id)
+        SELECT gen_random_uuid(), now(), now(), NULL,
+               i.created_by_id, NULL, i.id, i.supervisor_id, i.project_id, i.workspace_id
+        FROM issues i
+        WHERE i.supervisor_id IS NOT NULL
+        ON CONFLICT DO NOTHING
+        """
+    )
 
 
 def controllers_to_supervisor(apps, schema_editor):
-    """Reverse: a single supervisor can only hold one person, so keep the earliest."""
-    Issue = apps.get_model("db", "Issue")
-    IssueController = apps.get_model("db", "IssueController")
-
-    seen = set()
-    for row in (
-        IssueController.objects.filter(deleted_at__isnull=True)
-        .order_by("issue_id", "created_at")
-        .only("issue_id", "controller_id")
-        .iterator(chunk_size=500)
-    ):
-        if row.issue_id in seen:
-            continue
-        seen.add(row.issue_id)
-        Issue.objects.filter(id=row.issue_id).update(supervisor_id=row.controller_id)
+    """Reverse: a single supervisor holds one person, so keep the earliest controller."""
+    schema_editor.execute(
+        """
+        UPDATE issues i
+        SET supervisor_id = c.controller_id
+        FROM (
+            SELECT DISTINCT ON (issue_id) issue_id, controller_id
+            FROM issue_controllers
+            WHERE deleted_at IS NULL
+            ORDER BY issue_id, created_at
+        ) c
+        WHERE c.issue_id = i.id
+        """
+    )
 
 
 class Migration(migrations.Migration):
