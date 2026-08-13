@@ -233,6 +233,7 @@ class WorkspaceIssueAPIEndpoint(BaseAPIView):
             .select_related("parent")
             .prefetch_related("assignees")
             .prefetch_related("issue_assignee")
+            .prefetch_related("issue_controller")
             .prefetch_related("labels")
             .order_by(self.kwargs.get("order_by", "-created_at"))
         ).distinct()
@@ -306,6 +307,7 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
             .select_related("parent")
             .prefetch_related("assignees")
             .prefetch_related("issue_assignee")
+            .prefetch_related("issue_controller")
             .prefetch_related("labels")
             .order_by(self.kwargs.get("order_by", "-created_at"))
         ).distinct()
@@ -315,7 +317,7 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
 
         Reuses the shared filter parser (state, state_group, assignees,
         created_by, priority, labels, target_date ranges, ...) and adds the ERP
-        ones on top: the external entity a task is linked to and the supervisor
+        ones on top: the external entity a task is linked to and the controller
         fields this fork added to Issue.
         """
         filters = issue_filters(request.GET, "GET")
@@ -328,15 +330,15 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
         if external_id:
             filters["external_id"] = external_id
 
-        supervisor = request.GET.get("supervisor")
-        if supervisor:
-            supervisors = filter_valid_uuids([item for item in supervisor.split(",") if item != "null"])
-            if supervisors:
-                filters["supervisor__in"] = supervisors
+        controllers = request.GET.get("controllers")
+        if controllers:
+            controller_ids = filter_valid_uuids([item for item in controllers.split(",") if item != "null"])
+            if controller_ids:
+                filters["controllers__id__in"] = controller_ids
 
-        requires_approval = request.GET.get("requires_supervisor_approval")
+        requires_approval = request.GET.get("requires_approval")
         if requires_approval:
-            filters["requires_supervisor_approval"] = requires_approval.lower() in ("true", "1", "yes")
+            filters["requires_approval"] = requires_approval.lower() in ("true", "1", "yes")
 
         return filters
 
@@ -344,7 +346,7 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
     def apply_involves(request, queryset):
         """Filter to work items a given set of users is involved with.
 
-        "Involved" means assignee, creator or supervisor. The ERP needs this as one
+        "Involved" means assignee, creator or controller. The ERP needs this as one
         predicate ("my tasks", "my department's tasks") and the ordinary filters are
         ANDed together, so it cannot be expressed with `assignees` + `created_by`.
         """
@@ -357,7 +359,7 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
             return queryset
 
         return queryset.filter(
-            Q(assignees__id__in=user_ids) | Q(created_by_id__in=user_ids) | Q(supervisor_id__in=user_ids)
+            Q(assignees__id__in=user_ids) | Q(created_by_id__in=user_ids) | Q(controllers__id__in=user_ids)
         ).distinct()
 
     @staticmethod
@@ -635,6 +637,7 @@ class IssueDetailAPIEndpoint(BaseAPIView):
             .select_related("parent")
             .prefetch_related("assignees")
             .prefetch_related("issue_assignee")
+            .prefetch_related("issue_controller")
             .prefetch_related("labels")
             .order_by(self.kwargs.get("order_by", "-created_at"))
         ).distinct()

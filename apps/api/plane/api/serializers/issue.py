@@ -16,6 +16,7 @@ from plane.db.models import (
     IssueType,
     IssueActivity,
     IssueAssignee,
+    IssueController,
     FileAsset,
     IssueComment,
     IssueLabel,
@@ -66,15 +67,27 @@ class IssueSerializer(BaseSerializer):
     type_id = serializers.PrimaryKeyRelatedField(
         source="type", queryset=IssueType.objects.all(), required=False, allow_null=True
     )
+    # ERP: who signs the task off. Write-only like `assignees`, read back through
+    # `controller_ids` below.
+    controllers = serializers.ListField(
+        child=serializers.PrimaryKeyRelatedField(queryset=User.objects.values_list("id", flat=True)),
+        write_only=True,
+        required=False,
+    )
     # `assignees` above is write-only, so a plain read of a work item never showed
     # who it is assigned to.
     assignee_ids = serializers.SerializerMethodField(read_only=True)
+    controller_ids = serializers.SerializerMethodField(read_only=True)
 
     def get_assignee_ids(self, obj):
         # Read through the join model, not the m2m: unassigning only soft-deletes the
         # join row, and the m2m manager ignores deleted_at, so `obj.assignees` still
         # returns people who were removed (and duplicates anyone re-added).
         return [str(ia.assignee_id) for ia in obj.issue_assignee.all()]
+
+    def get_controller_ids(self, obj):
+        # Same soft-delete trap as assignees — read the join model, not the m2m.
+        return [str(ic.controller_id) for ic in obj.issue_controller.all()]
 
     class Meta:
         model = Issue
@@ -127,17 +140,21 @@ class IssueSerializer(BaseSerializer):
                 project_id=self.context.get("project_id"), id__in=data["labels"]
             ).values_list("id", flat=True)
 
-        # ERP: the supervisor signs the task off, so they must be on the project
-        if (
-            data.get("supervisor")
-            and not ProjectMember.objects.filter(
-                project_id=self.context.get("project_id"),
-                is_active=True,
-                role__gte=15,
-                member_id=data.get("supervisor").id,
-            ).exists()
-        ):
-            raise serializers.ValidationError("Supervisor is not a member of the project")
+        # ERP: controllers sign the task off, so they must be on the project.
+        # Unlike assignees, a controller who is not a member is an error rather than
+        # a silent drop — approval rights must never be quietly lost.
+        if data.get("controllers", []):
+            members = set(
+                ProjectMember.objects.filter(
+                    project_id=self.context.get("project_id"),
+                    is_active=True,
+                    role__gte=15,
+                    member_id__in=data["controllers"],
+                ).values_list("member_id", flat=True)
+            )
+            if len(members) != len(set(data["controllers"])):
+                raise serializers.ValidationError("Controller is not a member of the project")
+            data["controllers"] = list(members)
 
         # Check state is from the project only else raise validation error
         if (
@@ -171,6 +188,7 @@ class IssueSerializer(BaseSerializer):
 
     def create(self, validated_data):
         assignees = validated_data.pop("assignees", None)
+        controllers = validated_data.pop("controllers", None)
         labels = validated_data.pop("labels", None)
 
         project_id = self.context["project_id"]
@@ -250,10 +268,30 @@ class IssueSerializer(BaseSerializer):
             except IntegrityError:
                 pass
 
+        if controllers is not None and len(controllers):
+            try:
+                IssueController.objects.bulk_create(
+                    [
+                        IssueController(
+                            controller_id=controller_id,
+                            issue=issue,
+                            project_id=project_id,
+                            workspace_id=workspace_id,
+                            created_by_id=created_by_id,
+                            updated_by_id=updated_by_id,
+                        )
+                        for controller_id in controllers
+                    ],
+                    batch_size=10,
+                )
+            except IntegrityError:
+                pass
+
         return issue
 
     def update(self, instance, validated_data):
         assignees = validated_data.pop("assignees", None)
+        controllers = validated_data.pop("controllers", None)
         labels = validated_data.pop("labels", None)
 
         # Related models
@@ -276,6 +314,29 @@ class IssueSerializer(BaseSerializer):
                             updated_by_id=updated_by_id,
                         )
                         for assignee_id in assignees
+                    ],
+                    batch_size=10,
+                    ignore_conflicts=True,
+                )
+            except IntegrityError:
+                pass
+
+        if controllers is not None:
+            # Empty list clears them: taking every controller off a task is a
+            # legitimate edit, the approval then falls back to the creator.
+            IssueController.objects.filter(issue=instance).delete()
+            try:
+                IssueController.objects.bulk_create(
+                    [
+                        IssueController(
+                            controller_id=controller_id,
+                            issue=instance,
+                            project_id=project_id,
+                            workspace_id=workspace_id,
+                            created_by_id=created_by_id,
+                            updated_by_id=updated_by_id,
+                        )
+                        for controller_id in controllers
                     ],
                     batch_size=10,
                     ignore_conflicts=True,
