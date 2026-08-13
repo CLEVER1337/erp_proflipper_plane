@@ -226,8 +226,9 @@ def track_state(
         )
 
 
-# ERP: track changes in the task supervisor
-def track_supervisor(
+# ERP: track changes in the task controllers. They are a set, like assignees, so
+# one added or removed person is one activity row — not a single "old → new" pair.
+def track_controllers(
     requested_data,
     current_instance,
     issue_id,
@@ -237,38 +238,60 @@ def track_supervisor(
     issue_activities,
     epoch,
 ):
-    current_supervisor_id = current_instance.get("supervisor")
-    requested_supervisor_id = requested_data.get("supervisor")
+    requested_controllers = extract_ids(requested_data, "controller_ids", "controllers")
+    current_controllers = extract_ids(current_instance, "controller_ids", "controllers")
 
-    if current_supervisor_id is not None and not is_valid_uuid(current_supervisor_id):
-        current_supervisor_id = None
-    if requested_supervisor_id is not None and not is_valid_uuid(requested_supervisor_id):
-        requested_supervisor_id = None
+    for added_controller in requested_controllers - current_controllers:
+        if not is_valid_uuid(added_controller):
+            continue
 
-    if current_supervisor_id != requested_supervisor_id:
-        new_supervisor = User.objects.filter(pk=requested_supervisor_id).first()
-        old_supervisor = User.objects.filter(pk=current_supervisor_id).first()
+        controller = User.objects.filter(pk=added_controller).first()
+        if controller is None:
+            continue
 
         issue_activities.append(
             IssueActivity(
                 issue_id=issue_id,
                 actor_id=actor_id,
                 verb="updated",
-                old_value=old_supervisor.display_name if old_supervisor else None,
-                new_value=new_supervisor.display_name if new_supervisor else None,
-                field="supervisor",
+                old_value="",
+                new_value=controller.display_name,
+                field="controllers",
                 project_id=project_id,
                 workspace_id=workspace_id,
-                comment="updated the supervisor to",
-                old_identifier=old_supervisor.id if old_supervisor else None,
-                new_identifier=new_supervisor.id if new_supervisor else None,
+                comment="added controller ",
+                new_identifier=controller.id,
+                epoch=epoch,
+            )
+        )
+
+    for dropped_controller in current_controllers - requested_controllers:
+        if not is_valid_uuid(dropped_controller):
+            continue
+
+        controller = User.objects.filter(pk=dropped_controller).first()
+        if controller is None:
+            continue
+
+        issue_activities.append(
+            IssueActivity(
+                issue_id=issue_id,
+                actor_id=actor_id,
+                verb="updated",
+                old_value=controller.display_name,
+                new_value="",
+                field="controllers",
+                project_id=project_id,
+                workspace_id=workspace_id,
+                comment="removed controller ",
+                old_identifier=controller.id,
                 epoch=epoch,
             )
         )
 
 
-# ERP: track changes in the "supervisor approval required" flag
-def track_requires_supervisor_approval(
+# ERP: track changes in the "approval required" flag
+def track_requires_approval(
     requested_data,
     current_instance,
     issue_id,
@@ -278,8 +301,8 @@ def track_requires_supervisor_approval(
     issue_activities,
     epoch,
 ):
-    current_value = bool(current_instance.get("requires_supervisor_approval"))
-    requested_value = bool(requested_data.get("requires_supervisor_approval"))
+    current_value = bool(current_instance.get("requires_approval"))
+    requested_value = bool(requested_data.get("requires_approval"))
 
     if current_value != requested_value:
         issue_activities.append(
@@ -289,10 +312,10 @@ def track_requires_supervisor_approval(
                 verb="updated",
                 old_value=str(current_value).lower(),
                 new_value=str(requested_value).lower(),
-                field="requires_supervisor_approval",
+                field="requires_approval",
                 project_id=project_id,
                 workspace_id=workspace_id,
-                comment="updated the supervisor approval requirement to",
+                comment="updated the approval requirement to",
                 epoch=epoch,
             )
         )
@@ -687,12 +710,13 @@ def update_issue_activity(
         "archived_at": track_archive_at,
         "closed_to": track_closed_to,
         # ERP fields
-        "supervisor": track_supervisor,
-        "requires_supervisor_approval": track_requires_supervisor_approval,
+        "controller_ids": track_controllers,
+        "requires_approval": track_requires_approval,
         # External endpoint keys
         "parent": track_parent,
         "state": track_state,
         "assignees": track_assignees,
+        "controllers": track_controllers,
         "labels": track_labels,
     }
 
