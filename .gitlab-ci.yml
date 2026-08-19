@@ -20,7 +20,7 @@ variables:
   DOCKER_DRIVER: overlay2
   DOCKER_BUILDKIT: "1"
   BUILDKIT_PROGRESS: plain
-  DOCKER_REGISTRY: "containerregistry.gitlab-acrelis.ru"
+  DOCKER_REGISTRY: "containerregistry.gitlab-acrelis.ru:5050"
   PROD_IMAGE_TAG: "prod-latest"
   DEV_IMAGE_TAG: "dev-latest"
 
