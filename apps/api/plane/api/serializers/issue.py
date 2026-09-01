@@ -78,6 +78,9 @@ class IssueSerializer(BaseSerializer):
     # who it is assigned to.
     assignee_ids = serializers.SerializerMethodField(read_only=True)
     controller_ids = serializers.SerializerMethodField(read_only=True)
+    # ERP (task_TT2): the goals ("цели") a task belongs to. Read-only — the
+    # composition is edited through the module-issues endpoints, never here.
+    module_ids = serializers.SerializerMethodField(read_only=True)
 
     def get_assignee_ids(self, obj):
         # Read through the join model, not the m2m: unassigning only soft-deletes the
@@ -88,6 +91,11 @@ class IssueSerializer(BaseSerializer):
     def get_controller_ids(self, obj):
         # Same soft-delete trap as assignees — read the join model, not the m2m.
         return [str(ic.controller_id) for ic in obj.issue_controller.all()]
+
+    def get_module_ids(self, obj):
+        # Same soft-delete trap again — detaching a task from a goal only sets
+        # deleted_at on the join row, and the default manager already hides those.
+        return [str(mi.module_id) for mi in obj.issue_module.all()]
 
     class Meta:
         model = Issue

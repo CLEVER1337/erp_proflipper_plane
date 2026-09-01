@@ -79,10 +79,13 @@ from plane.db.models import (
     State,
     Workspace,
 )
-from plane.db.models.state import StateGroup
 from plane.settings.storage import S3Storage
 from plane.utils.path_validator import sanitize_filename
-from plane.utils.issue_filters import filter_valid_uuids, issue_filters
+from plane.utils.erp_issue_filters import (
+    build_erp_issue_filters,
+    apply_involves as erp_apply_involves,
+    apply_overdue as erp_apply_overdue,
+)
 from plane.utils.order_queryset import ACTIVITY_ORDER_BY_ALLOWLIST, sanitize_order_by
 from plane.utils.uuid import is_valid_uuid
 from plane.bgtasks.storage_metadata_task import get_asset_object_metadata
@@ -234,6 +237,7 @@ class WorkspaceIssueAPIEndpoint(BaseAPIView):
             .prefetch_related("assignees")
             .prefetch_related("issue_assignee")
             .prefetch_related("issue_controller")
+            .prefetch_related("issue_module")
             .prefetch_related("labels")
             .order_by(self.kwargs.get("order_by", "-created_at"))
         ).distinct()
@@ -308,78 +312,24 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
             .prefetch_related("assignees")
             .prefetch_related("issue_assignee")
             .prefetch_related("issue_controller")
+            .prefetch_related("issue_module")
             .prefetch_related("labels")
             .order_by(self.kwargs.get("order_by", "-created_at"))
         ).distinct()
 
+    # ERP: the three helpers live in plane/utils/erp_issue_filters.py — the goal
+    # (module) list applies the very same work item filters to decide which goals
+    # to show, and one implementation keeps the two lists from drifting apart.
     def build_filters(self, request):
-        """Query-param filters for the work item list.
-
-        Reuses the shared filter parser (state, state_group, assignees,
-        created_by, priority, labels, target_date ranges, ...) and adds the ERP
-        ones on top: the external entity a task is linked to and the controller
-        fields this fork added to Issue.
-        """
-        filters = issue_filters(request.GET, "GET")
-
-        external_source = request.GET.get("external_source")
-        if external_source:
-            filters["external_source"] = external_source
-
-        external_id = request.GET.get("external_id")
-        if external_id:
-            filters["external_id"] = external_id
-
-        controllers = request.GET.get("controllers")
-        if controllers:
-            controller_ids = filter_valid_uuids([item for item in controllers.split(",") if item != "null"])
-            if controller_ids:
-                filters["controllers__id__in"] = controller_ids
-
-        requires_approval = request.GET.get("requires_approval")
-        if requires_approval:
-            filters["requires_approval"] = requires_approval.lower() in ("true", "1", "yes")
-
-        return filters
+        return build_erp_issue_filters(request)
 
     @staticmethod
     def apply_involves(request, queryset):
-        """Filter to work items a given set of users is involved with.
-
-        "Involved" means assignee, creator or controller. The ERP needs this as one
-        predicate ("my tasks", "my department's tasks") and the ordinary filters are
-        ANDed together, so it cannot be expressed with `assignees` + `created_by`.
-        """
-        involves = request.GET.get("involves")
-        if not involves:
-            return queryset
-
-        user_ids = filter_valid_uuids([item for item in involves.split(",") if item != "null"])
-        if not user_ids:
-            return queryset
-
-        return queryset.filter(
-            Q(assignees__id__in=user_ids) | Q(created_by_id__in=user_ids) | Q(controllers__id__in=user_ids)
-        ).distinct()
+        return erp_apply_involves(request, queryset)
 
     @staticmethod
     def apply_overdue(request, queryset):
-        """Filter on the derived "overdue" flag.
-
-        Overdue is not a state: a task keeps its real status when the deadline
-        passes, and overdue means "has a target date in the past and is neither
-        completed nor cancelled".
-        """
-        overdue = request.GET.get("overdue")
-        if not overdue:
-            return queryset
-
-        closed_groups = [StateGroup.COMPLETED.value, StateGroup.CANCELLED.value]
-        is_overdue = Q(target_date__lt=timezone.now().date()) & ~Q(state__group__in=closed_groups)
-
-        if overdue.lower() in ("true", "1", "yes"):
-            return queryset.filter(is_overdue)
-        return queryset.exclude(is_overdue)
+        return erp_apply_overdue(request, queryset)
 
     @work_item_docs(
         operation_id="list_work_items",
@@ -638,6 +588,7 @@ class IssueDetailAPIEndpoint(BaseAPIView):
             .prefetch_related("assignees")
             .prefetch_related("issue_assignee")
             .prefetch_related("issue_controller")
+            .prefetch_related("issue_module")
             .prefetch_related("labels")
             .order_by(self.kwargs.get("order_by", "-created_at"))
         ).distinct()

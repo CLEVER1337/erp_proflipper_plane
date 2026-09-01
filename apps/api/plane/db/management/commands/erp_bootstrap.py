@@ -145,6 +145,13 @@ class Command(BaseCommand):
             defaults={"name": proj_name, "created_by": bot},
         )
         ProjectMember.objects.get_or_create(project=project, member=bot, defaults={"role": ROLE_ADMIN})
+        # ERP goals ("цели", task_TT2) are modules. `Project.module_view` defaults to
+        # False, and the module serializer refuses to create anything while it is off,
+        # so a project bootstrapped before goals existed has to be flipped here.
+        if not project.module_view:
+            project.module_view = True
+            project.save(update_fields=["module_view"])
+            self._log("module_view enabled (goals)")
         self._sync_erp_states(project, ws, bot)
         self._log(f"project={project.id} identifier={project.identifier}")
 

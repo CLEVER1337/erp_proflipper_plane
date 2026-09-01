@@ -42,7 +42,16 @@ from plane.db.models import (
 from .base import BaseAPIView
 from plane.bgtasks.webhook_task import model_activity
 from plane.utils.host import base_host
-from plane.utils.order_queryset import ISSUE_ORDER_BY_ALLOWLIST, sanitize_order_by
+from plane.utils.order_queryset import (
+    ISSUE_ORDER_BY_ALLOWLIST,
+    VIEW_ORDER_BY_ALLOWLIST,
+    sanitize_order_by,
+)
+from plane.utils.erp_issue_filters import (
+    apply_involves,
+    apply_overdue,
+    build_erp_issue_filters,
+)
 from plane.utils.openapi import (
     module_docs,
     module_issue_docs,
@@ -64,7 +73,6 @@ from plane.utils.openapi import (
     MODULE_ISSUE_EXAMPLE,
     INVALID_REQUEST_RESPONSE,
     PROJECT_NOT_FOUND_RESPONSE,
-    EXTERNAL_ID_EXISTS_RESPONSE,
     MODULE_NOT_FOUND_RESPONSE,
     DELETED_RESPONSE,
     ADMIN_ONLY_RESPONSE,
@@ -187,7 +195,6 @@ class ModuleListCreateAPIEndpoint(BaseAPIView):
             ),
             400: INVALID_REQUEST_RESPONSE,
             404: PROJECT_NOT_FOUND_RESPONSE,
-            409: EXTERNAL_ID_EXISTS_RESPONSE,
         },
     )
     def post(self, request, slug, project_id):
@@ -202,29 +209,11 @@ class ModuleListCreateAPIEndpoint(BaseAPIView):
             context={"project_id": project_id, "workspace_id": project.workspace_id},
         )
         if serializer.is_valid():
-            if (
-                request.data.get("external_id")
-                and request.data.get("external_source")
-                and Module.objects.filter(
-                    project_id=project_id,
-                    workspace__slug=slug,
-                    external_source=request.data.get("external_source"),
-                    external_id=request.data.get("external_id"),
-                ).exists()
-            ):
-                module = Module.objects.filter(
-                    project_id=project_id,
-                    workspace__slug=slug,
-                    external_source=request.data.get("external_source"),
-                    external_id=request.data.get("external_id"),
-                ).first()
-                return Response(
-                    {
-                        "error": "Module with the same external id and external source already exists",
-                        "id": str(module.id),
-                    },
-                    status=status.HTTP_409_CONFLICT,
-                )
+            # ERP (task_TT2): the external pair is deliberately NOT unique here. Upstream read
+            # `(external_source, external_id)` as "this module IS that object in another system"
+            # and rejected a second one. For ERP goals it means "this goal BELONGS TO that
+            # project", and a project has many goals — a sprint each. Rejecting the second goal
+            # of a project would make the feature unusable, so the guard is gone.
             serializer.save()
             # Send the model activity
             model_activity.delay(
@@ -240,6 +229,57 @@ class ModuleListCreateAPIEndpoint(BaseAPIView):
             serializer = ModuleSerializer(module)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def apply_erp_filters(self, request, queryset):
+        """ERP (task_TT2): filter the goal list.
+
+        Two families of query params, deliberately kept apart:
+
+        * `goal_*` — attributes of the goal itself (its name, the ERP project it
+          is pinned to). Prefixed because the unprefixed names are already taken
+          by work item filters and would be ambiguous here.
+        * everything else — the *work item* filters, exactly as the task list
+          understands them. With `has_work_items=1` a goal survives only if at
+          least one of its work items matches them. Without any of them the list
+          is left alone, so goals that hold no tasks yet stay visible.
+        """
+        # The module queryset takes its ordering from self.kwargs, which the public API
+        # never populates — without this the goal list is always newest-first.
+        queryset = queryset.order_by(sanitize_order_by(request.GET.get("order_by"), VIEW_ORDER_BY_ALLOWLIST))
+
+        goal_name = request.GET.get("goal_name")
+        if goal_name:
+            queryset = queryset.filter(name__icontains=goal_name)
+
+        external_source = request.GET.get("goal_external_source")
+        if external_source:
+            queryset = queryset.filter(external_source=external_source)
+
+        external_id = request.GET.get("goal_external_id")
+        if external_id:
+            queryset = queryset.filter(external_id=external_id)
+
+        has_external_id = request.GET.get("goal_has_external_id")
+        if has_external_id:
+            queryset = queryset.filter(external_id__isnull=has_external_id.lower() in ("false", "0", "no"))
+
+        if request.GET.get("has_work_items", "").lower() not in ("true", "1", "yes"):
+            return queryset
+
+        # The caller asked for goals that actually contain matching work items.
+        # Build the same queryset the work item list would return for these
+        # filters, then keep the goals it touches.
+        issues = Issue.issue_objects.filter(
+            project_id=self.kwargs.get("project_id"), workspace__slug=self.kwargs.get("slug")
+        )
+        issues = issues.filter(**build_erp_issue_filters(request))
+        issues = apply_overdue(request, apply_involves(request, issues))
+
+        # `.values("id")` keeps the subquery to one column — the involves filter adds a
+        # DISTINCT, and selecting every field alongside it is asking for trouble.
+        return queryset.filter(
+            issue_module__issue__in=issues.values("id"), issue_module__deleted_at__isnull=True
+        ).distinct()
 
     @module_docs(
         operation_id="list_modules",
@@ -270,7 +310,7 @@ class ModuleListCreateAPIEndpoint(BaseAPIView):
         """
         return self.paginate(
             request=request,
-            queryset=(self.get_queryset().filter(archived_at__isnull=True)),
+            queryset=self.apply_erp_filters(request, self.get_queryset().filter(archived_at__isnull=True)),
             on_results=lambda modules: ModuleSerializer(
                 modules, many=True, fields=self.fields, expand=self.expand
             ).data,
@@ -397,7 +437,6 @@ class ModuleDetailAPIEndpoint(BaseAPIView):
                 examples=[MODULE_UPDATE_EXAMPLE],
             ),
             404: OpenApiResponse(description="Module not found"),
-            409: OpenApiResponse(description="Module with same external ID already exists"),
         },
     )
     def patch(self, request, slug, project_id, pk):
@@ -417,23 +456,8 @@ class ModuleDetailAPIEndpoint(BaseAPIView):
             )
         serializer = ModuleUpdateSerializer(module, data=request.data, context={"project_id": project_id}, partial=True)
         if serializer.is_valid():
-            if (
-                request.data.get("external_id")
-                and (module.external_id != request.data.get("external_id"))
-                and Module.objects.filter(
-                    project_id=project_id,
-                    workspace__slug=slug,
-                    external_source=request.data.get("external_source", module.external_source),
-                    external_id=request.data.get("external_id"),
-                ).exists()
-            ):
-                return Response(
-                    {
-                        "error": "Module with the same external id and external source already exists",
-                        "id": str(module.id),
-                    },
-                    status=status.HTTP_409_CONFLICT,
-                )
+            # ERP (task_TT2): same reason as in the create endpoint — the external pair says
+            # which project a goal belongs to, and one project holds many goals.
             serializer.save()
 
             # Send the model activity
@@ -675,41 +699,30 @@ class ModuleIssueListCreateAPIEndpoint(BaseAPIView):
             "id", flat=True
         )
 
-        module_issues = list(ModuleIssue.objects.filter(issue_id__in=issues))
+        # ERP (task_TT2): attach, do not move. Upstream pulled a work item out of
+        # whatever module it was in and dropped it into this one, because Plane's
+        # UI treats a module as exclusive. ERP goals are not — one task may be part
+        # of several goals — so a task already in another goal stays there and only
+        # gains this one. Detaching is the caller's explicit act
+        # (DELETE .../module-issues/{issue_id}/).
+        already_here = set(
+            ModuleIssue.objects.filter(module_id=module_id, issue_id__in=issues).values_list("issue_id", flat=True)
+        )
 
-        update_module_issue_activity = []
-        records_to_update = []
-        record_to_create = []
-
-        for issue in issues:
-            module_issue = [module_issue for module_issue in module_issues if str(module_issue.issue_id) in issues]
-
-            if len(module_issue):
-                if module_issue[0].module_id != module_id:
-                    update_module_issue_activity.append(
-                        {
-                            "old_module_id": str(module_issue[0].module_id),
-                            "new_module_id": str(module_id),
-                            "issue_id": str(module_issue[0].issue_id),
-                        }
-                    )
-                    module_issue[0].module_id = module_id
-                    records_to_update.append(module_issue[0])
-            else:
-                record_to_create.append(
-                    ModuleIssue(
-                        module=module,
-                        issue_id=issue,
-                        project_id=project_id,
-                        workspace=module.workspace,
-                        created_by=request.user,
-                        updated_by=request.user,
-                    )
-                )
+        record_to_create = [
+            ModuleIssue(
+                module=module,
+                issue_id=issue,
+                project_id=project_id,
+                workspace=module.workspace,
+                created_by=request.user,
+                updated_by=request.user,
+            )
+            for issue in issues
+            if issue not in already_here
+        ]
 
         ModuleIssue.objects.bulk_create(record_to_create, batch_size=10, ignore_conflicts=True)
-
-        ModuleIssue.objects.bulk_update(records_to_update, ["module"], batch_size=10)
 
         # Capture Issue Activity
         issue_activity.delay(
@@ -720,7 +733,7 @@ class ModuleIssueListCreateAPIEndpoint(BaseAPIView):
             project_id=str(self.kwargs.get("project_id", None)),
             current_instance=json.dumps(
                 {
-                    "updated_module_issues": update_module_issue_activity,
+                    "updated_module_issues": [],
                     "created_module_issues": serializers.serialize("json", record_to_create),
                 }
             ),
