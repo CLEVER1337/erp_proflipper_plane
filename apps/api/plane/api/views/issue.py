@@ -428,9 +428,15 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
             issue_queryset = issue_queryset.annotate(
                 priority_order=Case(
                     *[When(priority=p, then=Value(i)) for i, p in enumerate(priority_order)],
+                    # ERP: как в state-ветке ниже — значение вне списка иначе аннотируется
+                    # в NULL и сортируется непредсказуемо.
+                    default=Value(len(priority_order)),
                     output_field=CharField(),
                 )
-            ).order_by("priority_order")
+                # ERP: тай-брейк обязателен. Различных приоритетов всего пять, а ERP-гейтвей
+                # ходит курсорной пагинацией — без вторичного ключа строки прыгают между
+                # страницами, и список задач получает дубли и пропуски.
+            ).order_by("priority_order", "-created_at")
 
         # State Ordering
         elif order_by_param in [
