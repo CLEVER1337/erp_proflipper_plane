@@ -85,6 +85,7 @@ from plane.utils.erp_issue_filters import (
     build_erp_issue_filters,
     apply_involves as erp_apply_involves,
     apply_overdue as erp_apply_overdue,
+    is_erp_external_source,
 )
 from plane.utils.order_queryset import ACTIVITY_ORDER_BY_ALLOWLIST, sanitize_order_by
 from plane.utils.uuid import is_valid_uuid
@@ -510,9 +511,16 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
         )
 
         if serializer.is_valid():
+            # ERP (task_B3): for our own `erp:*` sources the external pair is deliberately
+            # NOT unique. Upstream reads it as "this work item IS that object in another
+            # system"; for the ERP it means "this work item BELONGS TO that entity", and a
+            # project (lead, investor, employee) has many tasks. With the guard in place only
+            # the first task could be linked to an entity; every next one got a 409 that the
+            # gateway surfaced as a 502. Foreign integrations keep the upstream check.
             if (
                 request.data.get("external_id")
                 and request.data.get("external_source")
+                and not is_erp_external_source(request.data.get("external_source"))
                 and Issue.objects.filter(
                     project_id=project_id,
                     workspace__slug=slug,
@@ -834,13 +842,18 @@ class IssueDetailAPIEndpoint(BaseAPIView):
             partial=True,
         )
         if serializer.is_valid():
+            # ERP (task_B3): same reason as in the create endpoint — our `erp:*` pair says the
+            # work item BELONGS TO an entity, and an entity has many tasks, so re-linking a
+            # task to a project that already has one must not be a conflict.
+            effective_external_source = request.data.get("external_source", issue.external_source)
             if (
                 request.data.get("external_id")
                 and (issue.external_id != str(request.data.get("external_id")))
+                and not is_erp_external_source(effective_external_source)
                 and Issue.objects.filter(
                     project_id=project_id,
                     workspace__slug=slug,
-                    external_source=request.data.get("external_source", issue.external_source),
+                    external_source=effective_external_source,
                     external_id=request.data.get("external_id"),
                 ).exists()
             ):

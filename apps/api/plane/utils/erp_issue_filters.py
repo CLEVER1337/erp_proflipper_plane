@@ -51,6 +51,21 @@ def build_erp_issue_filters(request):
     return filters
 
 
+ERP_EXTERNAL_SOURCE_PREFIX = "erp:"
+
+
+def is_erp_external_source(external_source):
+    """Is this external reference one of ours (`erp:lead`, `erp:project`, ...)?
+
+    The ERP gateway writes the entity a task is linked to into the
+    `(external_source, external_id)` pair — `erp:` plus the entity type. Upstream
+    reads that pair as "this work item IS that object in another system" and keeps
+    it unique per project; for us it means "this work item BELONGS TO that entity",
+    and an entity has many tasks. Callers use this to tell the two meanings apart.
+    """
+    return bool(external_source) and str(external_source).startswith(ERP_EXTERNAL_SOURCE_PREFIX)
+
+
 def apply_involves(request, queryset):
     """Filter to work items a given set of users is involved with.
 
