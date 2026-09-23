@@ -65,9 +65,10 @@ DEFAULT_STATES = [
 # ERP task states. Seeded on the ERP project by the `erp_bootstrap` command and
 # consumed by the ERP gateway (leadservice). `external_id` is the stable machine
 # key the gateway resolves states by, so renaming a state in the Plane UI does not
-# break the ERP contract. There is deliberately no "overdue" state: overdue is
-# derived from `target_date` plus the state group, so a task keeps its real status
-# when the deadline passes.
+# break the ERP contract. "overdue" is a real state (task_TT5): a background job in
+# the gateway moves a work item into it once `target_date` is past, so filtering by
+# status yields disjoint buckets. It is never set by hand — the gateway rejects it
+# on write.
 ERP_STATE_SOURCE = "erp"
 
 ERP_TASK_STATES = [
@@ -94,6 +95,12 @@ ERP_TASK_STATES = [
         "external_id": "on_supervisor_review",
         "name": "На проверке руководителя",
         "color": "#8B5CF6",
+        "group": StateGroup.STARTED.value,
+    },
+    {
+        "external_id": "overdue",
+        "name": "Просрочена",
+        "color": "#DC2626",
         "group": StateGroup.STARTED.value,
     },
     {
