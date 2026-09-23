@@ -86,20 +86,55 @@ def apply_involves(request, queryset):
     ).distinct()
 
 
+def overdue_q():
+    """The derived "overdue" predicate: deadline in the past, work item still open."""
+    closed_groups = [StateGroup.COMPLETED.value, StateGroup.CANCELLED.value]
+    return Q(target_date__lt=timezone.now().date()) & ~Q(state__group__in=closed_groups)
+
+
 def apply_overdue(request, queryset):
     """Filter on the derived "overdue" flag.
 
     Overdue is not a state: a task keeps its real status when the deadline
     passes, and overdue means "has a target date in the past and is neither
     completed nor cancelled".
+
+    This one *narrows* — it is ANDed with the state filter, which is what the
+    board needs ("this column, minus the overdue ones"). For the other reading,
+    where overdue is one more bucket the caller ticked alongside real states,
+    see `pop_state_union`.
     """
     overdue = request.GET.get("overdue")
     if not overdue:
         return queryset
 
-    closed_groups = [StateGroup.COMPLETED.value, StateGroup.CANCELLED.value]
-    is_overdue = Q(target_date__lt=timezone.now().date()) & ~Q(state__group__in=closed_groups)
+    is_overdue = overdue_q()
 
     if overdue.lower() in ("true", "1", "yes"):
         return queryset.filter(is_overdue)
     return queryset.exclude(is_overdue)
+
+
+STATE_UNION_PARAM = "include_overdue"
+
+
+def pop_state_union(request, filters):
+    """Turn "state IN (...) AND overdue" into "state IN (...) OR overdue".
+
+    The ERP status filter is a checkbox list, and "overdue" sits in it next to
+    the real states. Ticking one more box has to *add* work items, never remove
+    them — but overdue is not a state, so ANDing it (the default reading, see
+    `apply_overdue`) made the fullest possible selection the narrowest result.
+
+    With `include_overdue=1` the caller says the two belong to the same union.
+    The state filter is taken out of `filters` (mutated in place) and handed
+    back as a Q, so the caller applies it with `.filter(...)` wherever it
+    applies the rest. Returns None when the caller asked for nothing.
+    """
+    if request.GET.get(STATE_UNION_PARAM, "").lower() not in ("true", "1", "yes"):
+        return None
+
+    state_ids = filters.pop("state__in", None)
+    is_overdue = overdue_q()
+    # No states alongside it — the union degenerates to plain "overdue only".
+    return is_overdue if not state_ids else Q(state__in=state_ids) | is_overdue

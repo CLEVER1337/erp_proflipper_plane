@@ -83,6 +83,7 @@ from plane.settings.storage import S3Storage
 from plane.utils.path_validator import sanitize_filename
 from plane.utils.erp_issue_filters import (
     build_erp_issue_filters,
+    pop_state_union,
     apply_involves as erp_apply_involves,
     apply_overdue as erp_apply_overdue,
     is_erp_external_source,
@@ -389,6 +390,10 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
         order_by_param = request.GET.get("order_by", "-created_at")
 
         filters = self.build_filters(request)
+        # ERP: `include_overdue` pulls the state filter out of `filters` so it can be
+        # ORed with the derived overdue flag instead of ANDed. Must be applied to both
+        # querysets below, otherwise the page and its total count disagree.
+        state_union = pop_state_union(request, filters)
 
         issue_queryset = (
             self.get_queryset()
@@ -419,6 +424,10 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
         total_issue_queryset = (
             Issue.issue_objects.filter(project_id=project_id, workspace__slug=slug).filter(**filters).distinct()
         )
+
+        if state_union is not None:
+            issue_queryset = issue_queryset.filter(state_union)
+            total_issue_queryset = total_issue_queryset.filter(state_union)
 
         issue_queryset = self.apply_overdue(request, self.apply_involves(request, issue_queryset))
         total_issue_queryset = self.apply_overdue(request, self.apply_involves(request, total_issue_queryset))

@@ -51,6 +51,7 @@ from plane.utils.erp_issue_filters import (
     apply_involves,
     apply_overdue,
     build_erp_issue_filters,
+    pop_state_union,
 )
 from plane.utils.openapi import (
     module_docs,
@@ -272,7 +273,13 @@ class ModuleListCreateAPIEndpoint(BaseAPIView):
         issues = Issue.issue_objects.filter(
             project_id=self.kwargs.get("project_id"), workspace__slug=self.kwargs.get("slug")
         )
-        issues = issues.filter(**build_erp_issue_filters(request))
+        filters = build_erp_issue_filters(request)
+        # Same state-vs-overdue union the work item list applies — the two lists must
+        # read one set of filters identically.
+        state_union = pop_state_union(request, filters)
+        issues = issues.filter(**filters)
+        if state_union is not None:
+            issues = issues.filter(state_union)
         issues = apply_overdue(request, apply_involves(request, issues))
 
         # `.values("id")` keeps the subquery to one column — the involves filter adds a
